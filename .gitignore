@@ -1,0 +1,33 @@
+# RAG Data
+data/*
+my_chroma_data
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Project
+out
+
+# ENV
+.env
+
+# Local
+Local
+.aider*
+.cursorrules
+.cursor/*
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv
+
+# node
+node_modules
