@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-engine"
+version = "0.1.1"
+description = "A comprehensive RAG engine for various applications."
+requires-python = ">=3.10"
+dependencies = [
+    "chromadb>=1.0.12",
+    "dotenv>=0.9.9",
+    "llama-index>=0.12.42",
+    "llama-index-llms-google-genai>=0.2.1",
+    "llama-index-embeddings-openai-like>=0.1.1",
+    "llama-index-vector-stores-chroma>=0.4.2",
+    "llama-index-readers-web>=0.4.2"
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black"]

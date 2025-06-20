@@ -1,137 +1,52 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 import os
-from werkzeug.utils import secure_filename
-import requests
-from bs4 import BeautifulSoup
-import PyPDF2
-import markdown
-import json
-from datetime import datetime
+import sys
+import logging
+from flask import Flask
 
-app = Flask(__name__)
-CORS(app)
+# 将 rag_engine 的父目录（即项目根目录）添加到 Python 路径中
+# 这样可以确保可以导入 rag_engine 模块
+# project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# sys.path.insert(0, project_root)
 
-# 配置文件上传目录
-UPLOAD_FOLDER = "uploads"
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
-# 知识库数据存储
-KNOWLEDGE_BASE_FILE = "knowledge_base.json"
-if not os.path.exists(KNOWLEDGE_BASE_FILE):
-    with open(KNOWLEDGE_BASE_FILE, "w") as f:
-        json.dump([], f)
+from rag_engine import RAGPipeline, config as engine_config
+from .config import BackendConfig
+from .routes import api
 
 
-def load_knowledge_base():
-    with open(KNOWLEDGE_BASE_FILE, "r") as f:
-        return json.load(f)
+def create_app() -> Flask:
+    """
+    应用工厂函数
+    """
+    app = Flask(__name__)
+    app.config.from_object(BackendConfig())
 
+    # 设置日志记录
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    )
 
-def save_knowledge_base(data):
-    with open(KNOWLEDGE_BASE_FILE, "w") as f:
-        json.dump(data, f)
-
-
-@app.route("/api/ask", methods=["POST"])
-def ask_question():
-    data = request.json
-    question = data.get("question")
-
-    # TODO: 实现实际的问答逻辑
-    # 这里只是一个示例响应
-    return jsonify({"answer": f"这是一个示例回答。您的问题是：{question}"})
-
-
-@app.route("/api/import/web", methods=["POST"])
-def import_web():
-    data = request.json
-    url = data.get("url")
-
+    # --- 依赖注入：创建并初始化 RAG 引擎单例 ---
+    # 这个实例会在整个应用的生命周期中存在
+    logging.info("正在初始化 RAG 管线...")
     try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.text, "html.parser")
-        text = soup.get_text()
-
-        # 保存到知识库
-        knowledge_base = load_knowledge_base()
-        knowledge_base.append(
-            {
-                "id": len(knowledge_base) + 1,
-                "name": url,
-                "type": "web",
-                "content": text,
-                "date": str(datetime.now()),
-            }
-        )
-        save_knowledge_base(knowledge_base)
-
-        return jsonify({"message": "导入成功"})
+        rag_pipeline_instance = RAGPipeline(config=engine_config)
+        rag_pipeline_instance.initialize()
+        app.rag_pipeline = rag_pipeline_instance
+        logging.info("RAG 管线初始化成功。")
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        logging.error(f"RAG 管线初始化失败: {e}", exc_info=True)
+        sys.exit(1)
 
+    # 注册 API 蓝图
+    app.register_blueprint(api)
 
-@app.route("/api/upload", methods=["POST"])
-def upload_file():
-    if "file" not in request.files:
-        return jsonify({"error": "没有文件"}), 400
+    @app.route("/")
+    def index():
+        return "RAG 引擎 API 正在运行中。使用 /api/groups 查看可用组。"
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "没有选择文件"}), 400
-
-    if file:
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-        file.save(filepath)
-
-        # 根据文件类型提取文本
-        text = ""
-        if filename.endswith(".txt"):
-            with open(filepath, "r", encoding="utf-8") as f:
-                text = f.read()
-        elif filename.endswith(".pdf"):
-            with open(filepath, "rb") as f:
-                pdf = PyPDF2.PdfReader(f)
-                text = ""
-                for page in pdf.pages:
-                    text += page.extract_text()
-        elif filename.endswith(".md"):
-            with open(filepath, "r", encoding="utf-8") as f:
-                md_text = f.read()
-                text = markdown.markdown(md_text)
-
-        # 保存到知识库
-        knowledge_base = load_knowledge_base()
-        knowledge_base.append(
-            {
-                "id": len(knowledge_base) + 1,
-                "name": filename,
-                "type": filename.split(".")[-1],
-                "content": text,
-                "date": str(datetime.now()),
-            }
-        )
-        save_knowledge_base(knowledge_base)
-
-        return jsonify({"message": "上传成功"})
-
-
-@app.route("/api/knowledge", methods=["GET"])
-def get_knowledge():
-    knowledge_base = load_knowledge_base()
-    return jsonify(knowledge_base)
-
-
-@app.route("/api/knowledge/<int:knowledge_id>", methods=["DELETE"])
-def delete_knowledge(knowledge_id):
-    knowledge_base = load_knowledge_base()
-    knowledge_base = [k for k in knowledge_base if k["id"] != knowledge_id]
-    save_knowledge_base(knowledge_base)
-    return jsonify({"message": "删除成功"})
+    return app
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app = create_app()
+    app.run(host=app.config["HOST"], port=app.config["PORT"], debug=app.config["DEBUG"])

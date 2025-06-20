@@ -1,6 +1,7 @@
 # RAG Data
 data/*
-my_chroma_data
+chroma_data
+temp*/
 
 # Editor directories and files
 .vscode/*
@@ -31,3 +32,6 @@ __pycache__
 
 # node
 node_modules
+
+# Deprecated frontend
+frontend_backup/
