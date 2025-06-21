@@ -1,0 +1,92 @@
+/* 定义颜色和样式的 CSS 变量 */
+:root {
+  --bg-primary: #181818;
+  --bg-secondary: #303030;
+  --bg-tertiary: #343541;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --modal-bg: #2A2A2E;
+  --modal-nav-bg: #1E1E21;
+  --bg-input: #2D2D31;
+
+  --text-primary: #ECECF1;
+  --text-secondary: #A9A9B3;
+  --text-placeholder: #666666;
+  --text-danger: #ED5E58;
+
+  --border-color: #4D4D4D;
+  --button-primary-bg: #40414F;
+  --button-danger-bg: #ED5E58;
+  --button-danger-text: #FFFFFF;
+  --button-secondary-bg: #40414F;
+  --send-button-active-bg: #FFFFFF;
+  --send-button-active-icon: #000000;
+
+  --link-color: #5695D2;
+  --switch-bg-on: #5695D2;
+  --switch-bg-off: #555;
+
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --sidebar-width: 260px;
+  --border-radius-large: 20px; /* 统一的大圆角 */
+}
+
+/* 基础样式重置和全局设置 */
+body {
+  margin: 0;
+  font-family: var(--font-family);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  overflow-y: hidden;
+  /* 防止主页面滚动 */
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}
+
+/* 模态框进入/离开动画 */
+.modal-fade-up-enter-active,
+.modal-fade-up-leave-active {
+  transition: all 0.3s ease;
+}
+
+.modal-fade-up-enter-from,
+.modal-fade-up-leave-to {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+/* 从下淡出 */
+.modal-fade-up-enter-to,
+.modal-fade-up-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
