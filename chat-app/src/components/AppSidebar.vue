@@ -16,7 +16,7 @@
 
     <div class="sidebar-content">
       <div class="sidebar-section">
-        <a href="#" class="sidebar-link">
+        <a href="#" class="sidebar-link" @click.prevent="router.push('/')">
           <Icon name="new_chat" />
           <span class="link-text">新聊天</span>
         </a>
@@ -24,7 +24,7 @@
           <Icon name="search" />
           <span class="link-text">搜索</span>
         </a>
-        <a href="#" class="sidebar-link">
+        <a href="#" class="sidebar-link" @click.prevent="router.push('/knowledge')">
           <Icon name="knowledge" />
           <span class="link-text">知识库</span>
         </a>
@@ -52,12 +52,16 @@
 
 <script setup lang="ts">
 import Icon from './AppIcon.vue'
+import { useRouter } from 'vue-router';
 
 defineProps<{
-  isCollapsed: boolean
+  isCollapsed: boolean;
 }>()
 
 const emit = defineEmits(['toggle', 'open-settings', 'open-search'])
+
+const router = useRouter();
+
 </script>
 
 <style scoped>
@@ -135,6 +139,9 @@ const emit = defineEmits(['toggle', 'open-settings', 'open-search'])
 .sidebar-link :deep(svg), .settings :deep(svg) {
   font-size: 20px;
   flex-shrink: 0;
+}
+.sidebar-link.active {
+  background-color: var(--bg-active);
 }
 
 /* 当收起时，链接和页脚按钮的内容靠左对齐 */

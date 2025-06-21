@@ -2,6 +2,8 @@
 :root {
   --bg-primary: #181818;
   --bg-secondary: #303030;
+  --bg-mid: #242424;
+  --bg-active: #202024;
   --bg-tertiary: #343541;
   --bg-overlay: rgba(0, 0, 0, 0.7);
   --modal-bg: #2A2A2E;

@@ -16,21 +16,21 @@
         <div class="input-actions">
           <div class="actions-left">
             <button class="input-icon-button">
-              <AppIcon name="plus" />
+              <Icon name="plus" />
             </button>
             <button class="input-icon-button">
-              <AppIcon name="tool" />
+              <Icon name="tool" />
             </button>
           </div>
           <div class="actions-right">
             <button class="input-icon-button">
-              <AppIcon name="microphone" />
+              <Icon name="microphone" />
             </button>
             <button
               class="input-icon-button send-button"
               :class="{ 'has-text': chatInputText.trim() !== '' }"
             >
-              <AppIcon name="send" />
+              <Icon name="send" />
             </button>
           </div>
         </div>
@@ -41,13 +41,17 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import AppIcon from '../components/AppIcon.vue'
+import Icon from '../components/AppIcon.vue'
 
 const welcomeMessages = [
-  '今天有什么议程？',
-  '有什么可以帮你的吗？',
-  '你好，今天想聊点什么？',
-  '请输入您的问题...',
+  '一小步和一大步。',
+  '天空即为极限！',
+  '宇宙没有义务向你解释一切，而我们有。',
+  '太空探索本身就是一种自然力量。',
+  '地球是人类的摇篮，但人类不能永远停留在摇篮里。',
+  '一些不可思议的事情正等待着我们去探索。',
+  '直抵群星。',
+  '要么我们在宇宙中是孤独的，要么我们并非孤独的。',
 ]
 
 const currentWelcomeMessage = ref('')

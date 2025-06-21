@@ -3,15 +3,17 @@
     <AppSidebar
       :is-collapsed="isSidebarCollapsed"
       @toggle="toggleSidebar"
+      @show-view="showView"
       @open-settings="openSettingsModal"
       @open-search="openSearchModal"
     />
-    <ChatView />
+    <main class="main-content">
+      <router-view />
+    </main>
   </div>
 
   <Teleport to="body">
     <SettingsModal v-if="isSettingsModalVisible" @close="closeSettingsModal" />
-
     <Transition name="modal-fade-up">
       <SearchModal v-if="isSearchModalVisible" @close="closeSearchModal" />
     </Transition>
@@ -21,30 +23,34 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import AppSidebar from './components/AppSidebar.vue'
-import ChatView from './views/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import SearchModal from './components/SearchModal.vue'
 
+type ViewName = 'chat' | 'knowledge'
+
+const currentView = ref<ViewName>('chat')
 const isSettingsModalVisible = ref(false)
 const isSearchModalVisible = ref(false)
-const isSidebarCollapsed = ref(false) // 新增状态：控制侧边栏
+const isSidebarCollapsed = ref(false)
 
+const showView = (viewName: ViewName) => {
+  currentView.value = viewName
+}
+
+const toggleSidebar = () => {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value
+}
 const openSettingsModal = () => {
   isSettingsModalVisible.value = true
 }
 const closeSettingsModal = () => {
   isSettingsModalVisible.value = false
 }
-
 const openSearchModal = () => {
   isSearchModalVisible.value = true
 }
 const closeSearchModal = () => {
   isSearchModalVisible.value = false
-}
-
-const toggleSidebar = () => {
-  isSidebarCollapsed.value = !isSidebarCollapsed.value
 }
 </script>
 
@@ -53,11 +59,10 @@ const toggleSidebar = () => {
   display: flex;
   width: 100%;
   height: 100%;
-  transition: filter 0.3s ease-in-out;
 }
-
-/* 当设置模态框打开时，给背景应用模糊效果 */
-.app-container.modal-open {
-  filter: blur(4px);
+.main-content {
+  flex-grow: 1;
+  height: 100vh;
+  overflow: hidden;
 }
 </style>

@@ -90,7 +90,7 @@ const chatHistory: Ref<ChatGroup[]> = ref([
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: var(--search-overlay-bg, rgba(0, 0, 0, 0.5)); /* 添加了备用值 */
+  background-color: transparent;
   display: flex;
   justify-content: center;
   align-items: flex-start; /* 从顶部开始对齐 */
