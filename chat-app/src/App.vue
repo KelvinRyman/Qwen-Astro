@@ -1,6 +1,11 @@
 <template>
-  <div class="app-container" :class="{ 'modal-open': isSettingsModalVisible }">
-    <AppSidebar @open-settings="openSettingsModal" @open-search="openSearchModal" />
+  <div class="app-container" :class="{ 'sidebar-collapsed': isSidebarCollapsed }">
+    <AppSidebar
+      :is-collapsed="isSidebarCollapsed"
+      @toggle="toggleSidebar"
+      @open-settings="openSettingsModal"
+      @open-search="openSearchModal"
+    />
     <ChatView />
   </div>
 
@@ -16,12 +21,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import AppSidebar from './components/AppSidebar.vue'
-import ChatView from './components/ChatView.vue'
+import ChatView from './views/ChatView.vue'
 import SettingsModal from './components/SettingsModal.vue'
-import SearchModal from './components/SearchModal.vue' // 引入新组件
+import SearchModal from './components/SearchModal.vue'
 
 const isSettingsModalVisible = ref(false)
-const isSearchModalVisible = ref(false) // 新增状态
+const isSearchModalVisible = ref(false)
+const isSidebarCollapsed = ref(false) // 新增状态：控制侧边栏
 
 const openSettingsModal = () => {
   isSettingsModalVisible.value = true
@@ -35,6 +41,10 @@ const openSearchModal = () => {
 }
 const closeSearchModal = () => {
   isSearchModalVisible.value = false
+}
+
+const toggleSidebar = () => {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value
 }
 </script>
 

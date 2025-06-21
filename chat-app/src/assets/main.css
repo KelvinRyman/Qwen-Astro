@@ -28,6 +28,7 @@
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 
   --sidebar-width: 260px;
+  --sidebar-width-collapsed: 64px; /* 折叠状态的侧边栏宽度 */
   --border-radius-large: 20px; /* 统一的大圆角 */
 }
 

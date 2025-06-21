@@ -41,7 +41,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import AppIcon from './AppIcon.vue' // 确保您已将 Icon.vue 重命名
+import AppIcon from '../components/AppIcon.vue'
 
 const welcomeMessages = [
   '今天有什么议程？',
