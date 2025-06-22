@@ -5,6 +5,7 @@ import shutil
 import logging
 from typing import Dict, Optional, List
 from threading import Lock, RLock
+from datetime import datetime
 
 from .config import RAGConfig
 from .utils import ensure_directory_exists
@@ -26,7 +27,10 @@ class GroupManager:
         ensure_directory_exists(self.data_root)
 
     def _load_meta(self) -> Dict[str, Dict]:
-        """加载元数据文件。如果文件不存在，则返回空字典。"""
+        """
+        加载元数据文件。如果文件不存在，则返回空字典。
+        确保正确处理中文字符。
+        """
         with self._lock:
             if not os.path.exists(self.meta_file_path):
                 return {}
@@ -38,7 +42,7 @@ class GroupManager:
                 return {}
 
     def _save_meta(self):
-        """将当前元数据保存到文件。"""
+        """将当前元数据保存到文件，确保正确处理中文字符。"""
         with self._lock:
             try:
                 with open(self.meta_file_path, "w", encoding="utf-8") as f:
@@ -75,6 +79,8 @@ class GroupManager:
             "name": name,
             "description": description,
             "directory": group_id,  # 只存储相对ID，不存储完整路径
+            "files": [],
+            "webpages": [],
         }
 
         # 使用 group_id 作为元数据中的 key，这比用 name 更稳定
@@ -109,6 +115,163 @@ class GroupManager:
         if not meta:
             return None
         return os.path.join(self.data_root, meta["directory"])
+
+    def get_file_by_id(self, group_id: str, file_id: str) -> Optional[Dict]:
+        """通过文件ID在指定组中查找文件元数据。"""
+        group = self.get_group_by_id(group_id)
+        if group:
+            for file_info in group.get("files", []):
+                if file_info.get("id") == file_id:
+                    return file_info
+        return None
+
+    def get_file_by_name(self, group_id: str, file_name: str) -> Optional[Dict]:
+        """通过文件名在指定组中查找文件元数据。"""
+        group = self.get_group_by_id(group_id)
+        if group:
+            for file_info in group.get("files", []):
+                if file_info.get("name") == file_name:
+                    return file_info
+        return None
+        
+    def get_webpage_by_url(self, group_id: str, url: str) -> Optional[Dict]:
+        """通过URL在指定组中查找网页元数据。"""
+        group = self.get_group_by_id(group_id)
+        if group:
+            for webpage_info in group.get("webpages", []):
+                if webpage_info.get("url") == url:
+                    return webpage_info
+        return None
+
+    def add_file_meta(
+        self, group_id: str, file_name: str, file_size: int, storage_path: str = None, status: str = "processing"
+    ) -> Optional[Dict]:
+        """
+        向元数据中添加一个文件的记录。
+        
+        Args:
+            group_id: 组的唯一标识符
+            file_name: 原始文件名（可能包含中文）
+            file_size: 文件大小（字节）
+            storage_path: 存储路径（相对于组目录，通常使用ID作为文件名）
+            status: 文件处理状态
+        
+        Returns:
+            成功则返回文件元数据字典，失败则返回None
+        """
+        with self._lock:
+            group_meta = self.groups_meta.get(group_id)
+            if not group_meta:
+                logging.error(f"添加文件元数据失败：找不到组 (ID: {group_id})。")
+                return None
+
+            # 如果没有提供存储路径，则使用文件名作为存储路径
+            if storage_path is None:
+                storage_path = file_name
+
+            file_meta = {
+                "id": str(uuid.uuid4()),
+                "name": file_name,
+                "path": storage_path,  # 物理路径相对于组目录
+                "creation_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "size": file_size,
+                "status": status,
+            }
+            group_meta["files"].append(file_meta)
+            self._save_meta()
+            logging.info(f"成功将文件 '{file_name}' 的元数据添加到组 '{group_meta['name']}'。")
+            return file_meta
+
+    def update_file_status(self, group_id: str, file_id: str, status: str) -> bool:
+        """更新组中特定文件的状态。"""
+        with self._lock:
+            group_meta = self.groups_meta.get(group_id)
+            if not group_meta:
+                return False
+
+            for file_info in group_meta.get("files", []):
+                if file_info.get("id") == file_id:
+                    file_info["status"] = status
+                    self._save_meta()
+                    logging.info(f"文件 {file_id} 的状态已更新为: {status}")
+                    return True
+            return False
+
+    def remove_file_meta(self, group_id: str, file_id: str) -> bool:
+        """只从元数据中移除一个文件的记录。"""
+        with self._lock:
+            group_meta = self.groups_meta.get(group_id)
+            if not group_meta:
+                return False
+
+            initial_len = len(group_meta["files"])
+            group_meta["files"] = [f for f in group_meta["files"] if f["id"] != file_id]
+
+            if len(group_meta["files"]) < initial_len:
+                self._save_meta()
+                return True
+            return False
+
+    def add_webpage_meta(self, group_id: str, url: str, status: str = "processing") -> Optional[Dict]:
+        """只向元数据中添加一个网页的记录。"""
+        with self._lock:
+            group_meta = self.groups_meta.get(group_id)
+            if not group_meta:
+                logging.error(f"添加网页元数据失败：找不到组 (ID: {group_id})。")
+                return None
+
+            webpage_meta = {
+                "id": str(uuid.uuid4()),
+                "url": url,
+                "creation_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "status": status,
+            }
+            group_meta["webpages"].append(webpage_meta)
+            self._save_meta()
+            logging.info(f"成功将网页 '{url}' 的元数据添加到组 '{group_meta['name']}'。")
+            return webpage_meta
+
+    def update_webpage_status(self, group_id: str, webpage_id: str, status: str) -> bool:
+        """更新组中特定网页的状态。"""
+        with self._lock:
+            group_meta = self.groups_meta.get(group_id)
+            if not group_meta:
+                return False
+
+            for page_info in group_meta.get("webpages", []):
+                if page_info.get("id") == webpage_id:
+                    page_info["status"] = status
+                    self._save_meta()
+                    logging.info(f"网页 {webpage_id} 的状态已更新为: {status}")
+                    return True
+            return False
+
+    def remove_webpage_meta(self, group_id: str, webpage_id: str) -> bool:
+        """只从元数据中移除一个网页的记录。"""
+        with self._lock:
+            group_meta = self.groups_meta.get(group_id)
+            if not group_meta:
+                return False
+
+            initial_len = len(group_meta["webpages"])
+            group_meta["webpages"] = [
+                w for w in group_meta["webpages"] if w["id"] != webpage_id
+            ]
+
+            if len(group_meta["webpages"]) < initial_len:
+                self._save_meta()
+                return True
+            return False
+
+    def list_files_metadata(self, group_id: str) -> List[Dict]:
+        """返回指定组中所有文件的元数据列表。"""
+        group = self.get_group_by_id(group_id)
+        return group.get("files", []) if group else []
+
+    def list_webpages_metadata(self, group_id: str) -> List[Dict]:
+        """返回指定组中所有网页的元数据列表。"""
+        group = self.get_group_by_id(group_id)
+        return group.get("webpages", []) if group else []
 
     def delete_group_metadata_and_storage(self, group_id: str) -> bool:
         """

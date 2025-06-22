@@ -1,6 +1,6 @@
 import logging
 import hashlib
-from typing import List
+from typing import List, Dict, Optional
 from llama_index.core.schema import Document, BaseNode
 from llama_index.core.node_parser import SimpleNodeParser
 from llama_index.core import SimpleDirectoryReader
@@ -12,7 +12,7 @@ from .config import RAGConfig
 class DataProcessor:
     """负责加载、处理和将文档转换为节点的类"""
 
-    STABLE_METADATA_KEYS = ["file_name", "page_label"]
+    STABLE_METADATA_KEYS = ["file_name", "page_label", "file_id", "webpage_id", "source_url"]
 
     def __init__(self, config: RAGConfig):
         self.config = config
@@ -23,27 +23,6 @@ class DataProcessor:
         logging.info(
             f"节点解析器已初始化 (chunk_size={config.CHUNK_SIZE}, chunk_overlap={config.CHUNK_OVERLAP})"
         )
-
-    # def _load_from_directory(
-    #     self, directory_path: str, group_id: str
-    # ) -> List[Document]:
-    #     """
-    #     从指定的目录加载所有文档，并为每个文档附加 group_id 元数据。
-    #     """
-    #     if not os.path.isdir(directory_path):
-    #         logging.warning(f"目录 '{directory_path}' 不存在，无法加载文档。")
-    #         return []
-
-    #     logging.info(f"正在从目录 '{directory_path}' 为组 '{group_id}' 加载文档...")
-    #     documents = SimpleDirectoryReader(
-    #         input_dir=directory_path, recursive=True
-    #     ).load_data()
-
-    #     for doc in documents:
-    #         doc.metadata["group_id"] = group_id
-
-    #     logging.info(f"已为 {len(documents)} 份文档分配 group_id: '{group_id}'。")
-    #     return documents
 
     @staticmethod
     def _clean_and_normalize(documents: List[Document]) -> List[Document]:
@@ -84,44 +63,19 @@ class DataProcessor:
         logging.info(f"已为 {len(nodes)} 个节点生成稳定的哈希ID。")
         return nodes
 
-    # def process_directory(self, directory_path: str, group_id: str) -> List[BaseNode]:
-    #     """
-    #     执行针对特定目录和组的完整数据处理流程。
-    #     """
-    #     documents_with_group = self._load_from_directory(directory_path, group_id)
-    #     if not documents_with_group:
-    #         return []
-
-    #     cleaned_documents = self._clean_and_normalize(documents_with_group)
-
-    #     base_nodes = self.node_parser.get_nodes_from_documents(
-    #         cleaned_documents, include_metadata=True, include_prev_next_rel=False
-    #     )
-
-    #     stable_nodes = self._generate_stable_node_ids(base_nodes)
-    #     logging.info(
-    #         f"为组 '{group_id}' 从目录处理完成，共生成 {len(stable_nodes)} 个节点。"
-    #     )
-    #     return stable_nodes
-
-    def _load_from_web(self, url: str, group_id: str) -> List[Document]:
-        """从网页加载文档并附加 group_id 元数据。
-
-        Keyword arguments:
-        url -- 网页的 URL
-        group_id -- 文档的组 ID
-        Return: 包含网页内容的文档列表
+    def _load_from_web(self, webpage_meta: Dict, group_id: str) -> List[Document]:
+        """从网页加载文档并附加 group_id 和 webpage_id 元数据。
         """
+        url = webpage_meta["url"]
         try:
             loader = BeautifulSoupWebReader()
             documents = loader.load_data(urls=[url])
 
             for doc in documents:
-                # LlamaIndex 加载器可能不提供有用的元数据，我们手动添加
                 doc.metadata["source_url"] = url
-                # 保持和文件处理的一致性，使用 URL 作为文件名
                 doc.metadata["file_name"] = url  # 使用 URL 作为文件名以保持一致性
                 doc.metadata["group_id"] = group_id
+                doc.metadata["webpage_id"] = webpage_meta["id"]
 
             logging.info(
                 f"成功从 URL '{url}' 为组 '{group_id}' 加载了 {len(documents)} 份文档。"
@@ -132,19 +86,39 @@ class DataProcessor:
             return []
 
     def process_data(
-        self, group_id: str, file_paths: List[str] = None, urls: List[str] = None
+        self,
+        group_id: str,
+        files_meta: Optional[List[Dict]] = None,
+        webpages_meta: Optional[List[Dict]] = None,
     ) -> List[BaseNode]:
         """
         统一处理来自文件或URL的数据源。
+        现在它接收元数据字典列表，而不是简单的路径或URL列表。
         """
         documents_with_group = []
-        if file_paths:
-            documents_with_group.extend(
-                self._load_from_directory_files(file_paths, group_id)
-            )
-        if urls:
-            for url in urls:
-                documents_with_group.extend(self._load_from_web(url, group_id))
+        if files_meta:
+            # 从文件元数据中提取物理路径
+            file_paths = [meta["physical_path"] for meta in files_meta]
+            # 加载文档
+            loaded_docs = self._load_from_directory_files(file_paths, group_id)
+            # 将 file_id 回填到每个文档的元数据中
+            for doc in loaded_docs:
+                # 找到这个文档对应的原始元数据
+                original_meta = next(
+                    (
+                        meta
+                        for meta in files_meta
+                        if meta["name"] == doc.metadata.get("file_name")
+                    ),
+                    None,
+                )
+                if original_meta:
+                    doc.metadata["file_id"] = original_meta["id"]
+            documents_with_group.extend(loaded_docs)
+
+        if webpages_meta:
+            for meta in webpages_meta:
+                documents_with_group.extend(self._load_from_web(meta, group_id))
 
         if not documents_with_group:
             return []

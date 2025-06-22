@@ -18,9 +18,21 @@
             <button class="input-icon-button">
               <Icon name="plus" />
             </button>
-            <button class="input-icon-button">
-              <Icon name="tool" />
-            </button>
+            <div ref="toolMenuContainerRef" class="tool-button-wrapper">
+              <button class="input-icon-button" @click="isToolMenuOpen = !isToolMenuOpen">
+                <Icon name="tool" />
+              </button>
+              <div v-if="isToolMenuOpen" class="tool-menu">
+                <button class="tool-menu-item">
+                  <Icon name="think" />
+                  <span>深度思考</span>
+                </button>
+                <button class="tool-menu-item">
+                  <Icon name="web" />
+                  <span>搜索网页</span>
+                </button>
+              </div>
+            </div>
           </div>
           <div class="actions-right">
             <button class="input-icon-button">
@@ -40,7 +52,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import Icon from '../components/AppIcon.vue'
 
 const welcomeMessages = [
@@ -58,6 +70,15 @@ const currentWelcomeMessage = ref('')
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const chatInputText = ref('') // 用于绑定 textarea 内容
 
+const isToolMenuOpen = ref(false)
+const toolMenuContainerRef = ref<HTMLElement | null>(null)
+
+const handleClickOutside = (event: MouseEvent) => {
+  if (toolMenuContainerRef.value && !toolMenuContainerRef.value.contains(event.target as Node)) {
+    isToolMenuOpen.value = false
+  }
+}
+
 const handleInput = () => {
   const textarea = textareaRef.value
   if (textarea) {
@@ -69,6 +90,11 @@ const handleInput = () => {
 onMounted(() => {
   const randomIndex = Math.floor(Math.random() * welcomeMessages.length)
   currentWelcomeMessage.value = welcomeMessages[randomIndex]
+  document.addEventListener('click', handleClickOutside)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside)
 })
 </script>
 
@@ -107,7 +133,7 @@ onMounted(() => {
   flex-direction: column;
   background-color: var(--bg-input);
   border-radius: var(--border-radius-large);
-  border: 1px solid var(--border-color);
+  /* border: 1px solid var(--border-color); */
   padding: 16px;
 }
 
@@ -181,10 +207,8 @@ onMounted(() => {
 
 .send-button {
   background-color: var(--button-primary-bg);
+  cursor: not-allowed;
   color: var(--text-secondary); /* 默认状态下图标为灰色 */
-}
-.send-button:hover {
-  background-color: #5b5c68;
 }
 
 /* 当输入框有内容时应用的样式 */
@@ -194,5 +218,49 @@ onMounted(() => {
 }
 .send-button.has-text:hover {
   filter: brightness(0.9);
+  cursor: pointer;
+}
+
+.tool-button-wrapper {
+  position: relative;
+}
+
+.tool-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #2c2d30;
+  border-radius: var(--border-radius-medium);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 10;
+  width: max-content;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.tool-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  border-radius: var(--border-radius-medium);
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  font-size: 14px;
+}
+
+.tool-menu-item:hover {
+  background-color: #4f5058;
+}
+
+.tool-menu-item :deep(svg) {
+  font-size: 20px;
 }
 </style>

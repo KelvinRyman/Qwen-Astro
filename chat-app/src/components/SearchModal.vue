@@ -18,7 +18,7 @@
 
         <!-- 如果有聊天记录，则渲染列表 -->
         <div v-else class="history-list">
-          <!-- “新聊天”按钮始终在顶部 -->
+          <!-- "新聊天"按钮始终在顶部 -->
           <a href="#" class="new-chat-link">
             <Icon name="new_chat" />
             <span>新聊天</span>
@@ -40,46 +40,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
-import type { Ref } from 'vue';
 import Icon from './AppIcon.vue';
+import { useChatStore } from '@/stores/chat';
 
 defineEmits(['close']);
 
-// 定义数据结构类型
-interface ChatItem {
-  id: number;
-  title: string;
-}
-
-interface ChatGroup {
-  title: string;
-  items: ChatItem[];
-}
-
-// 填充示例聊天记录
-const chatHistory: Ref<ChatGroup[]> = ref([
-  {
-    title: '今天',
-    items: [
-      { id: 1, title: 'TypeScript vs JavaScript in Vue' },
-    ]
-  },
-  {
-    title: '昨天',
-    items: [
-      { id: 2, title: 'ChatGPT 对话记录管理' },
-    ]
-  },
-  {
-    title: '前 7 天',
-    items: [
-      { id: 3, title: 'LLM Fine-Tuning in Space' },
-      { id: 4, title: 'DeepSpeed MP Error' },
-      { id: 5, title: '双卡 3090 微调 Qwen3' }
-    ]
-  }
-]);
+const chatStore = useChatStore();
+const { chatHistory } = chatStore;
 
 </script>
 

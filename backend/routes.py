@@ -1,5 +1,6 @@
 import os
 import uuid
+import threading
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import HTTPException
@@ -14,6 +15,11 @@ from .models import (
     SourcesDeleteRequest,
     WebImportRequest,
     AskRequest,
+    WebpagesDeleteRequest,
+    FilesDeleteRequest,
+    WebpagesAddRequest,
+    ConversationCreationRequest,
+    MessagePostRequest,
 )
 from rag_engine import RAGPipeline
 
@@ -125,431 +131,414 @@ def delete_group(group_id: str):
 # --- 文件管理和索引路由 ---
 
 
-@api.route("/groups/<group_id>/files", methods=["POST"])
-def add_data_to_group(group_id: str):
+def _index_files_task(app, group_id, files_to_index):
     """
-    上传文件到指定组并触发索引过程
+    在后台线程中执行文件索引的函数。
+    """
+    with app.app_context():
+        pipeline = get_rag_pipeline()
+        group_dir = pipeline.group_manager.get_group_physical_path(group_id)
+        if not group_dir:
+            current_app.logger.error(f"无法为组 {group_id} 找到物理路径，索引任务中止。")
+            return
 
-    Keyword arguments:
-    group_id -- 组的 ID
-    Return: 上传和索引是否成功
+        for file_meta in files_to_index:
+            file_id = file_meta['id']
+            try:
+                # 状态已在创建时设为 processing，这里无需更新
+                # pipeline.group_manager.update_file_status(group_id, file_id, "processing")
+                
+                # 为数据处理器准备带有完整物理路径的元数据
+                file_meta_with_path = file_meta.copy()
+                file_path = os.path.join(group_dir, file_meta["path"])
+                
+                # 确认文件存在
+                if not os.path.exists(file_path):
+                    current_app.logger.error(f"文件 {file_path} 在索引时未找到。")
+                    pipeline.group_manager.update_file_status(group_id, file_id, "failed")
+                    continue
+
+                file_meta_with_path["physical_path"] = file_path
+
+                nodes = pipeline.data_processor.process_data(
+                    group_id=group_id, files_meta=[file_meta_with_path]
+                )
+                if nodes:
+                    pipeline.index.insert_nodes(nodes)
+                
+                pipeline.group_manager.update_file_status(group_id, file_id, "completed")
+                current_app.logger.info(f"成功索引文件 ID {file_id}。")
+
+            except Exception as e:
+                current_app.logger.error(f"索引文件 ID {file_id} 时失败: {e}", exc_info=True)
+                pipeline.group_manager.update_file_status(group_id, file_id, "failed")
+
+
+def _index_webpages_task(app, group_id, webpages_to_index):
+    """
+    在后台线程中执行网页索引的函数。
+    """
+    with app.app_context():
+        pipeline = get_rag_pipeline()
+        for page_meta in webpages_to_index:
+            page_id = page_meta['id']
+            try:
+                nodes = pipeline.data_processor.process_data(
+                    group_id=group_id, webpages_meta=[page_meta]
+                )
+                if nodes:
+                    pipeline.index.insert_nodes(nodes)
+                
+                pipeline.group_manager.update_webpage_status(group_id, page_id, "completed")
+                current_app.logger.info(f"成功索引网页 ID {page_id}。")
+
+            except Exception as e:
+                current_app.logger.error(f"索引网页 ID {page_id} 时失败: {e}", exc_info=True)
+                pipeline.group_manager.update_webpage_status(group_id, page_id, "failed")
+
+
+@api.route("/groups/<group_id>/files", methods=["POST"])
+def add_files_to_group(group_id: str):
+    """
+    上传一个或多个文件到指定组。
+    此接口会立即返回，并在后台触发索引过程。
     """
     pipeline = get_rag_pipeline()
-
-    # 1. 验证组是否存在
     group = pipeline.group_manager.get_group_by_id(group_id)
     if not group:
         return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
 
-    content_type = request.content_type
+    if "files" not in request.files:
+        return jsonify({"error": "请求中没有文件部分。"}), 400
 
-    if content_type and "multipart/form-data" in content_type.lower():
-        # 2. 检查是否有文件上传
-        if "files" not in request.files:
-            return jsonify({"error": "请求中没有文件部分。"}), 400
+    files = request.files.getlist("files")
+    if not files or all(f.filename == "" for f in files):
+        return jsonify({"error": "没有选择文件。"}), 400
 
-        files = request.files.getlist("files")
-        if not files or all(f.filename == "" for f in files):
-            return jsonify({"error": "没有选择文件。"}), 400
+    group_dir = pipeline.group_manager.get_group_physical_path(group_id)
+    if not group_dir:
+        return jsonify({"error": f"无法获取组 '{group['name']}' 的物理路径。"}), 500
 
-        # 3. 保存文件到临时目录
-        temp_dir = current_app.config["UPLOAD_FOLDER"]
-        os.makedirs(temp_dir, exist_ok=True)
+    added_files_meta = []
+    for file in files:
+        if file and file.filename:
+            # 保留原始文件名（包括中文），不使用secure_filename
+            original_filename = file.filename
+            
+            # 检查文件名是否已存在于元数据中
+            if pipeline.group_manager.get_file_by_name(group_id, original_filename):
+                current_app.logger.warning(
+                    f"文件名 '{original_filename}' 已存在于组 '{group['name']}' 中，已跳过上传。"
+                )
+                continue
+            
+            # 生成文件ID
+            file_id = str(uuid.uuid4())
+            
+            # 获取文件扩展名
+            _, file_extension = os.path.splitext(original_filename)
+            if not file_extension:
+                # 如果没有扩展名，默认为.txt
+                file_extension = '.txt'
+            
+            # 使用ID作为文件名保存
+            storage_filename = f"{file_id}{file_extension}"
+            destination_path = os.path.join(group_dir, storage_filename)
+            
+            try:
+                file.save(destination_path)
+                file_size = os.path.getsize(destination_path)
+                
+                # 添加元数据，初始状态为 'processing'
+                meta = pipeline.group_manager.add_file_meta(
+                    group_id, original_filename, file_size, storage_filename, status="processing"
+                )
+                if meta:
+                    added_files_meta.append(meta)
+            except Exception as e:
+                current_app.logger.error(f"保存文件 '{original_filename}' 失败: {e}", exc_info=True)
+                # 可选：如果保存失败，可以决定是否要中止整个批次
+                continue
+    
+    if not added_files_meta:
+        return jsonify({"message": "没有新文件被添加（可能已存在或保存失败）。"}), 200
 
-        saved_file_paths = []
-        for file in files:
-            if file and file.filename:
-                # 使用 UUID 避免文件名冲突
-                filename = secure_filename(file.filename)
-                unique_filename = f"{uuid.uuid4()}_{filename}"
-                temp_path = os.path.join(temp_dir, unique_filename)
-                file.save(temp_path)
-                saved_file_paths.append(temp_path)
+    # 启动后台线程执行索引
+    thread = threading.Thread(
+        target=_index_files_task, args=(current_app._get_current_object(), group_id, added_files_meta)
+    )
+    thread.daemon = True
+    thread.start()
 
-        if not saved_file_paths:
-            return jsonify({"error": "没有有效的文件被保存。"}), 400
-
-        try:
-            # 4. 调用引擎处理文件并索引
-            pipeline.add_and_index_data(group_id, file_paths=saved_file_paths)
-
-            return (
-                jsonify(
-                    {
-                        "message": f"成功上传了 {len(saved_file_paths)} 个文件到组 '{group['name']}' 并触发了索引。"
-                    }
-                ),
-                202,
-            )  # 202 Accepted 表示请求已接受，正在处理
-
-        finally:
-            # 5. 清理临时文件
-            for path in saved_file_paths:
-                os.remove(path)
-
-    elif content_type and "application/json" in content_type.lower():
-        try:
-            data = WebImportRequest.model_validate(request.json)
-            pipeline.add_and_index_data(group_id, urls=[data.url])
-            return (
-                jsonify(
-                    {
-                        "message": f"成功导入网页 {data.url} 到组 '{group['name']}' 并触发了索引。"
-                    }
-                ),
-                202,
-            )
-        except ValidationError as e:
-            return handle_validation_error(e)
-    else:
-        return jsonify({"error": "不支持的内容类型"}), 415
+    return jsonify(added_files_meta), 202
 
 
-@api.route("groups/<group_id>/sources", methods=["DELETE"])
-def delete_sources(group_id: str):
+@api.route("/groups/<group_id>/files/<file_id>", methods=["GET"])
+def get_file_details(group_id: str, file_id: str):
     """
-    从指定组中删除数据源
-
-    Keyword arguments:
-    group_id -- 组的 ID
-    Return: 操作是否成功
+    获取单个文件的详细信息，包括其索引状态。
     """
-    """从组中删除指定的数据源"""
     pipeline = get_rag_pipeline()
+    file_meta = pipeline.group_manager.get_file_by_id(group_id, file_id)
+    if not file_meta:
+        return jsonify({"error": "文件未找到。"}), 404
+    return jsonify(file_meta)
 
+
+@api.route("/groups/<group_id>/webpages", methods=["POST"])
+def add_webpages_to_group(group_id: str):
+    """
+    将一个或多个网页URL添加到指定组，并在后台为它们创建索引。
+    """
+    pipeline = get_rag_pipeline()
     if not pipeline.group_manager.get_group_by_id(group_id):
-        return jsonify({"error": f"Group with ID '{group_id}' not found."}), 404
+        return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
 
     try:
-        data = SourcesDeleteRequest.model_validate(request.json)
+        data = WebpagesAddRequest.model_validate(request.json)
     except ValidationError as e:
         return handle_validation_error(e)
 
-    success = pipeline.delete_sources_from_group(group_id, data.sources)
+    added_webpages_meta = []
+    for url in data.urls:
+        if pipeline.group_manager.get_webpage_by_url(group_id, url):
+            current_app.logger.warning(f"URL '{url}' 已存在于组中，已跳过。")
+            continue
+        
+        meta = pipeline.group_manager.add_webpage_meta(group_id, url, status="processing")
+        if meta:
+            added_webpages_meta.append(meta)
 
+    if not added_webpages_meta:
+        return jsonify({"message": "没有新网页被添加（可能已存在）。"}), 200
+
+    # 启动后台线程执行索引
+    thread = threading.Thread(
+        target=_index_webpages_task, args=(current_app._get_current_object(), group_id, added_webpages_meta)
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify(added_webpages_meta), 202
+
+
+@api.route("/groups/<group_id>/sources", methods=["GET"])
+def list_sources_in_group(group_id: str):
+    """
+    列出指定组中的所有数据源（文件和网页）。
+    """
+    pipeline = get_rag_pipeline()
+    if not pipeline.group_manager.get_group_by_id(group_id):
+        return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
+
+    sources = pipeline.list_sources_in_group(group_id)
+    return jsonify(sources)
+
+
+@api.route("/groups/<group_id>/files", methods=["DELETE"])
+def delete_files_from_group(group_id: str):
+    """
+    从指定组中删除一个或多个文件。
+    """
+    pipeline = get_rag_pipeline()
+    if not pipeline.group_manager.get_group_by_id(group_id):
+        return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
+
+    try:
+        data = FilesDeleteRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    success = pipeline.delete_files_from_group(group_id, data.file_ids)
     if success:
-        return (
-            jsonify({"message": "Specified sources have been successfully deleted."}),
-            200,
-        )
+        return jsonify({"message": "指定的文件已成功删除。"}), 200
     else:
-        return (
-            jsonify({"error": "An error occurred while deleting some of the sources."}),
-            500,
-        )
+        return jsonify({"error": "删除部分或全部文件时出错。"}), 500
 
 
-# --- 查询路由 ---
+@api.route("/groups/<group_id>/webpages", methods=["DELETE"])
+def delete_webpages_from_group(group_id: str):
+    """
+    从指定组中删除一个或多个网页。
+    """
+    pipeline = get_rag_pipeline()
+    if not pipeline.group_manager.get_group_by_id(group_id):
+        return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
+
+    try:
+        data = WebpagesDeleteRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    success = pipeline.delete_webpages_from_group(group_id, data.webpage_ids)
+    if success:
+        return jsonify({"message": "指定的网页已成功删除。"}), 200
+    else:
+        return jsonify({"error": "删除部分或全部网页时出错。"}), 500
+
+
+@api.route("/groups/<group_id>/webpages/<webpage_id>", methods=["GET"])
+def get_webpage_details(group_id: str, webpage_id: str):
+    """
+    获取单个网页的详细信息，包括其索引状态。
+    """
+    pipeline = get_rag_pipeline()
+    # 需要在 GroupManager 中添加一个 get_webpage_by_id 的方法
+    group = pipeline.group_manager.get_group_by_id(group_id)
+    if not group:
+        return jsonify({"error": "组未找到。"}), 404
+    
+    webpage_meta = next((w for w in group.get('webpages', []) if w['id'] == webpage_id), None)
+    
+    if not webpage_meta:
+        return jsonify({"error": "网页未找到。"}), 404
+    return jsonify(webpage_meta)
+
+
+# --- 查询和聊天路由 ---
 
 
 @api.route("/query", methods=["POST"])
 def query_rag():
     """在指定组内执行查询"""
+    pipeline = get_rag_pipeline()
     try:
         data = QueryRequest.model_validate(request.json)
     except ValidationError as e:
         return handle_validation_error(e)
 
-    pipeline = get_rag_pipeline()
+    try:
+        response = pipeline.query_in_groups(data.query, data.group_ids)
 
-    # 验证所有请求的 group_id 是否都存在
-    all_groups = pipeline.list_all_groups()
-    all_group_ids = {g["id"] for g in all_groups}
-    invalid_ids = [gid for gid in data.group_ids if gid not in all_group_ids]
-    if invalid_ids:
-        return (
-            jsonify({"error": "提供的组 ID 无效", "invalid_ids": invalid_ids}),
-            400,
+        # 将 LlamaIndex 的响应对象转换为可序列化的 JSON
+        source_nodes = [
+            SourceNodeModel.from_source_node(n) for n in response.source_nodes
+        ]
+        result = QueryResponse(
+            answer=str(response),
+            sources=source_nodes,
         )
 
-    try:
-        response = pipeline.query_in_groups(data.query_text, data.group_ids)
-
-        # 将引擎的响应格式化为我们的 API 模型
-        source_nodes = []
-        if hasattr(response, "source_nodes") and response.source_nodes:
-            for node_with_score in response.source_nodes:
-                metadata = node_with_score.node.metadata
-                source_nodes.append(
-                    SourceNodeModel(
-                        score=node_with_score.score,
-                        group_id=metadata.get("group_id", "N/A"),
-                        file_name=metadata.get("file_name", "N/A"),
-                        page_label=metadata.get("page_label", "N/A"),
-                        text_snippet=node_with_score.node.text[:250].strip() + "...",
-                    )
-                )
-
-        api_response = QueryResponse(answer=str(response), source_nodes=source_nodes)
-        return jsonify(api_response.model_dump()), 200
-
+        return result.model_dump_json(), 200
     except Exception as e:
         current_app.logger.error(f"查询处理期间出错: {e}", exc_info=True)
-        return jsonify({"error": "查询处理失败。"}), 500
-
-
-@api.route("groups/<group_id>/sources", methods=["GET"])
-def list_sources(group_id: str):
-    """
-    列出指定组内所有的数据源。
-
-    Keyword arguments:
-    group_id -- 组的 ID
-    Return: 数据源列表
-    """
-    pipeline = get_rag_pipeline()
-
-    if not pipeline.group_manager.get_group_by_id(group_id):
-        return jsonify({"error": f"Group with ID '{group_id}' not found."}), 404
-
-    sources = pipeline.list_sources_in_group(group_id)
-    return jsonify(sources), 200
-
-
-# --- 历史会话相关路由 ---
+        return jsonify({"error": "处理查询时发生内部错误。"}), 500
 
 
 @api.route("/conversations", methods=["POST"])
 def create_conversation():
-    """创建一个新的空会话"""
+    """创建一个新的对话，可以选择关联一个或多个知识库组。"""
     pipeline = get_rag_pipeline()
-    conversation_meta = pipeline.conversation_manager.create_conversation()
-    return jsonify(conversation_meta), 201
+    try:
+        data = ConversationCreationRequest.model_validate(request.json)
+    except ValidationError:
+        # 如果请求体为空，也视为有效，创建一个无关联的对话
+        data = ConversationCreationRequest(group_ids=None)
+    
+    # 验证所有提供的 group_id 是否都存在
+    if data.group_ids:
+        all_group_ids = {g["id"] for g in pipeline.list_all_groups()}
+        invalid_ids = [gid for gid in data.group_ids if gid not in all_group_ids]
+        if invalid_ids:
+            return jsonify({"error": "提供的组 ID 无效", "invalid_ids": invalid_ids}), 400
+
+    conversation_id = str(uuid.uuid4())
+    conversation = pipeline.conversation_manager.create_conversation(
+        conversation_id, data.group_ids
+    )
+    return jsonify(conversation), 201
 
 
 @api.route("/conversations", methods=["GET"])
 def list_conversations():
-    """列出所有会话"""
+    """列出所有对话的摘要。"""
     pipeline = get_rag_pipeline()
     conversations = pipeline.conversation_manager.list_conversations()
-    return jsonify(conversations), 200
+    return jsonify(conversations)
 
 
 @api.route("/conversations/<conversation_id>", methods=["GET"])
 def get_conversation(conversation_id: str):
-    """获取指定会话的详情"""
+    """获取一个对话的详细信息，包括完整的消息历史。"""
     pipeline = get_rag_pipeline()
     conversation = pipeline.conversation_manager.get_conversation(conversation_id)
-    if conversation:
-        return jsonify(conversation), 200
-    else:
-        return jsonify({"error": "会话未找到"}), 404
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+    return jsonify(conversation)
 
 
 @api.route("/conversations/<conversation_id>/messages", methods=["POST"])
 def post_message_to_conversation(conversation_id: str):
-    """在会话中发送新消息并获取回复"""
+    """向指定对话发送消息并获取回复。"""
     pipeline = get_rag_pipeline()
 
-    # 1. 验证请求体
+    # 1. 验证对话是否存在
+    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+
+    # 2. 验证请求数据
     try:
-        data = ChatMessageRequest.model_validate(request.json)
+        data = MessagePostRequest.model_validate(request.json)
     except ValidationError as e:
         return handle_validation_error(e)
 
-    # 2. 获取当前会话历史
-    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
-    if not conversation:
-        return jsonify({"error": "会话未找到"}), 404
-    chat_history = conversation["messages"]
+    # 3. 准备聊天历史和上下文
+    # LlamaIndex 需要的格式是 {'role': 'user'/'assistant', 'content': '...'}
+    chat_history = conversation.get("messages", [])
+    group_ids = conversation.get("group_ids", [])
 
-    # 3. 调用聊天方法
-    response = pipeline.chat(data.query_text, chat_history, data.group_ids)
+    # 4. 调用 RAG 引擎
+    try:
+        response = pipeline.chat(
+            query_text=data.message,
+            chat_history=chat_history,
+            group_ids=group_ids,
+        )
+    except Exception as e:
+        current_app.logger.error(f"聊天处理期间出错: {e}", exc_info=True)
+        return jsonify({"error": "处理聊天时发生内部错误。"}), 500
 
-    # 4. 保存用户消息和AI回复到历史记录
-    user_message = {"role": "user", "content": data.query_text}
-    ai_response_content = response.response if hasattr(response, "response") else "抱歉，我暂时无法回答这个问题。"
-    assistant_message = {"role": "assistant", "content": ai_response_content}
-
+    # 5. 保存新的消息到历史记录
     pipeline.conversation_manager.add_message_to_conversation(
-        conversation_id, user_message
+        conversation_id, "user", data.message
     )
     pipeline.conversation_manager.add_message_to_conversation(
-        conversation_id, assistant_message
+        conversation_id, "assistant", str(response)
     )
+    
+    # 6. 返回响应
+    # 安全地处理 source_nodes，因为普通聊天可能没有这个属性
+    source_nodes_data = []
+    if hasattr(response, "source_nodes") and response.source_nodes:
+        source_nodes_data = [
+            SourceNodeModel.from_source_node(n) for n in response.source_nodes
+        ]
 
-    # 5. 格式化并返回响应
-    # (为了简化，我们直接返回 assistant_message)
-    # 我们可以返回更完整的响应，包括源节点
-    api_response = {
-        "answer": assistant_message,
-        "source_nodes": (
-            [
-                SourceNodeModel.model_validate(
-                    {
-                        "score": node.score,
-                        "group_id": node.node.metadata.get("group_id", "N/A"),
-                        "file_name": node.node.metadata.get("file_name", "N/A"),
-                        "page_label": node.node.metadata.get("page_label", "N/A"),
-                        "text_snippet": node.node.text[:250].strip() + "...",
-                    }
-                ).model_dump()
-                for node in response.source_nodes
-            ]
-            if hasattr(response, "source_nodes")
-            else []
-        ),
-    }
-    return jsonify(api_response), 200
+    result = QueryResponse(
+        answer=str(response),
+        sources=source_nodes_data,
+    )
+    return result.model_dump_json(), 200
 
 
 @api.route("/conversations/<conversation_id>", methods=["DELETE"])
 def delete_conversation(conversation_id: str):
-    """删除一个会话"""
+    """删除一个对话及其所有历史记录。"""
     pipeline = get_rag_pipeline()
     if pipeline.conversation_manager.delete_conversation(conversation_id):
-        return jsonify({"message": "会话已删除"}), 200
+        return jsonify({"message": "对话已成功删除。"}), 200
     else:
-        return jsonify({"error": "会话未找到"}), 404
+        return jsonify({"error": "对话未找到。"}), 404
 
 
 @api.route("/conversations/search", methods=["GET"])
 def search_conversations():
-    """搜索会话内容"""
-    query = request.args.get("q", "")
+    """根据查询字符串搜索对话。"""
+    query = request.args.get("q")
     if not query:
-        return jsonify({"error": "需要提供查询参数 'q'"}), 400
+        return jsonify({"error": "必须提供查询参数 'q'。"}), 400
 
     pipeline = get_rag_pipeline()
     results = pipeline.conversation_manager.search_conversations(query)
     return jsonify(results), 200
-
-
-# --- 向后兼容的问答路由 ---
-legacy_api = Blueprint("legacy_api", __name__, url_prefix="/api")
-
-
-def get_default_group(pipeline: RAGPipeline) -> str:
-    """
-    获取默认组 ID，如果没有组则创建一个。
-    """
-    default_group_name = "default"
-    group = pipeline.group_manager.get_group_by_name(default_group_name)
-    if not group:
-        group = pipeline.group_manager.create_group(
-            default_group_name, "Default group for legacy uploads"
-        )
-    return group
-
-
-@legacy_api.route("/ask", methods=["POST"])
-def legacy_ask_question():
-    """旧的 /ask 路由"""
-    pipeline = get_rag_pipeline()
-    try:
-        data = AskRequest.model_validate(request.json)
-    except ValidationError as e:
-        return handle_validation_error(e)
-
-    # 如果没有提供 group_ids，则使用默认组
-    if not data.group_ids:
-        all_groups = pipeline.list_all_groups()
-        group_ids = [g["id"] for g in all_groups]
-        if not group_ids:
-            return jsonify(
-                {
-                    "answer": "知识库为空，请先添加数据。",
-                }
-            )
-    else:
-        group_ids = data.group_ids
-
-    # 调用与新 /query 相同的逻辑
-    response = pipeline.query_in_groups(data.question, group_ids)
-
-    # 只返回简单答案以保持兼容性
-    return jsonify({"answer": str(response)})
-
-
-@legacy_api.route("/import/web", methods=["POST"])
-def legacy_import_web():
-    """兼容旧的 /import/web 路由"""
-    pipeline = get_rag_pipeline()
-    try:
-        data = WebImportRequest.model_validate(request.json)
-    except ValidationError as e:
-        return handle_validation_error(e)
-
-    group = get_default_group(pipeline)
-    pipeline.add_and_index_data(group_id=group["id"], urls=[data.url])
-
-    return jsonify({"message": "导入成功"}), 202
-
-
-@legacy_api.route("/upload", methods=["POST"])
-def legacy_upload_file():
-    """兼容旧的 /upload 路由"""
-    pipeline = get_rag_pipeline()
-
-    if "file" not in request.files:
-        return jsonify({"error": "没有文件"}), 400
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "没有选择文件"}), 400
-
-    group = get_default_group(pipeline)
-    temp_dir = current_app.config["UPLOAD_FOLDER"]
-    os.makedirs(temp_dir, exist_ok=True)
-
-    filename = secure_filename(file.filename)
-    temp_path = os.path.join(temp_dir, f"{uuid.uuid4()}_{filename}")
-    file.save(temp_path)
-
-    try:
-        pipeline.add_and_index_data(group_id=group["id"], file_paths=[temp_path])
-        return jsonify({"message": "上传成功"}), 202
-    finally:
-        os.remove(temp_path)
-
-
-@legacy_api.route("/knowledge", methods=["GET"])
-def legacy_get_knowledge():
-    """
-    兼容旧的 /knowledge 路由。
-    这个路由现在变得有些模糊。一个合理的实现是返回所有组及其包含的文件列表。
-    这是一个新功能，需要我们在 GroupManager 中添加对文件列表的跟踪。
-    **简化实现**：为保持简单，我们返回组列表作为知识的顶级分类。
-    """
-    pipeline = get_rag_pipeline()
-    groups = pipeline.list_all_groups()
-    # 格式化为旧的 knowledge_base 格式
-    knowledge_base = [
-        {
-            "id": i + 1,
-            "name": g["name"],
-            "type": "group",
-            "content": g["description"],
-            "date": "N/A",  # 日期信息在新架构中不再直接跟踪
-        }
-        for i, g in enumerate(groups)
-    ]
-    return jsonify(knowledge_base)
-
-
-@legacy_api.route("/knowledge/<knowledge_id>", methods=["DELETE"])
-def legacy_delete_knowledge(knowledge_id):
-    """
-    兼容旧的 /knowledge/<id> 路由，现在映射到删除一个组。
-    注意：旧的 knowledge_id 是一个自增整数，而新的则是UUID。
-    我们需要一个映射机制。最简单的兼容方式是按顺序查找。
-    """
-    pipeline = get_rag_pipeline()
-    # 按名称排序以获得一个确定性的列表
-    groups = sorted(pipeline.list_all_groups(), key=lambda x: x["name"])
-
-    if not (1 <= knowledge_id <= len(groups)):
-        return jsonify({"error": f"Knowledge ID {knowledge_id} is out of bounds."}), 404
-
-    group_to_delete = groups[knowledge_id - 1]
-    group_id_to_delete = group_to_delete["id"]
-
-    current_app.logger.warning(
-        f"Legacy API call to delete knowledge ID {knowledge_id}, which maps to group '{group_to_delete['name']}' (ID: {group_id_to_delete})."
-    )
-
-    # 调用与新 API 相同的删除逻辑
-    success = pipeline.delete_group_completely(group_id_to_delete)
-    if success:
-        return jsonify({"message": "删除成功"}), 200
-    else:
-        return jsonify({"error": "删除组时发生内部错误。"}), 500

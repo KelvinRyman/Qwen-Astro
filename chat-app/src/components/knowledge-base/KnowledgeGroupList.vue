@@ -6,11 +6,22 @@
         v-for="group in groups"
         :key="group.id"
         class="group-item"
-        :class="{ active: group.id === activeGroupId }"
-        @click="$emit('select-group', group.id)"
+        :class="{ active: group.id === activeGroupId, 'menu-open': openMenuGroupId === group.id }"
+        @click="handleSelectGroup(group.id)"
       >
-        <Icon name="group" />
-        <span>{{ group.name }}</span>
+        <div class="group-item-content">
+          <Icon name="group" />
+          <span class="group-name">{{ group.name }}</span>
+        </div>
+        <div class="group-item-actions" @click.stop>
+          <ItemDropdownMenu
+            :is-open="openMenuGroupId === group.id"
+            @toggle="toggleMenu(group.id)"
+            @close="openMenuGroupId = null"
+            @rename="handleRename(group.id)"
+            @delete="handleDelete(group.id)"
+          />
+        </div>
       </li>
     </ul>
     <button class="add-button" @click="$emit('add-group')">
@@ -21,8 +32,10 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { KnowledgeGroup } from '@/stores/knowledgeBase'
 import Icon from '@/components/AppIcon.vue'
+import ItemDropdownMenu from '@/components/ItemDropdownMenu.vue'
 
 defineProps<{
   groups: KnowledgeGroup[]
@@ -30,7 +43,32 @@ defineProps<{
   isLoading: boolean
 }>()
 
-defineEmits(['select-group', 'add-group'])
+const emit = defineEmits(['select-group', 'add-group', 'rename-group', 'delete-group'])
+
+const openMenuGroupId = ref<string | null>(null)
+
+const handleSelectGroup = (groupId: string) => {
+  if (openMenuGroupId.value) {
+    // If a menu is open, the first click should close it, not switch groups.
+    openMenuGroupId.value = null
+  } else {
+    emit('select-group', groupId)
+  }
+}
+
+const toggleMenu = (groupId: string) => {
+  openMenuGroupId.value = openMenuGroupId.value === groupId ? null : groupId
+}
+
+const handleRename = (groupId: string) => {
+  openMenuGroupId.value = null
+  emit('rename-group', groupId)
+}
+
+const handleDelete = (groupId: string) => {
+  openMenuGroupId.value = null
+  emit('delete-group', groupId)
+}
 </script>
 
 <style scoped>
@@ -60,15 +98,17 @@ defineEmits(['select-group', 'add-group'])
 .group-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 8px 0;
-  padding: 10px 14px;
+  justify-content: space-between;
+  margin: 2px 0;
+  padding: 0;
   border-radius: 8px;
   cursor: pointer;
   color: var(--text-secondary);
   transition:
     background-color 0.2s,
     color 0.2s;
+  height: 40px;
+  box-sizing: border-box;
 }
 .group-item:hover {
   background-color: var(--bg-tertiary);
@@ -78,8 +118,34 @@ defineEmits(['select-group', 'add-group'])
   background-color: var(--button-primary-bg);
   color: var(--text-primary);
 }
+.group-item-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  height: 100%;
+  pointer-events: none;
+}
 .group-item :deep(svg) {
   font-size: 18px;
+}
+.group-name {
+  flex-grow: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.group-item-actions {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  padding-right: 8px;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+.group-item:hover .group-item-actions,
+.group-item.menu-open .group-item-actions {
+  opacity: 1;
 }
 .add-button {
   display: flex;

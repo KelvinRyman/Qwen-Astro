@@ -49,59 +49,102 @@ class RAGPipeline:
         )
         logging.info("--- RAG 管道已准备就绪 ---")
 
-    def add_and_index_data(
-        self, group_id: str, file_paths: List[str] = None, urls: List[str] = None
-    ):
+    def add_files_to_group(
+        self, group_id: str, source_file_paths: List[str]
+    ) -> List[Dict]:
         """
-        统一的接口，用于添加文件或URL，并立即进行索引。
+        向指定组中添加多个文件，处理物理存储、元数据和向量索引。
         """
-        logging.info(f"--- 开始向组 '{group_id}' 添加并索引新数据 ---")
+        group_meta = self.group_manager.get_group_by_id(group_id)
+        if not group_meta:
+            logging.error(f"添加文件失败：找不到组 (ID: {group_id})。")
+            return []
 
-        # 1. (可选) 将文件物理移动到组目录
-        if file_paths:
-            group_dir = self.group_manager.get_group_physical_path(group_id)
-            if not group_dir:
-                logging.error(f"无法找到组 '{group_id}' 的物理目录。")
-                return
+        group_dir = self.group_manager.get_group_physical_path(group_id)
+        if not group_dir:
+            logging.error(f"无法找到组 '{group_id}' 的物理目录，无法添加文件。")
+            return []
 
-            processed_file_paths = []
-            for src_path in file_paths:
-                if os.path.exists(src_path):
-                    try:
-                        dest_path = os.path.join(group_dir, os.path.basename(src_path))
-                        shutil.copy(src_path, dest_path)
-                        processed_file_paths.append(dest_path)
-                    except Exception as e:
-                        logging.error(f"复制文件 '{src_path}' 失败: {e}")
-                else:
-                    logging.warning(f"源文件 '{src_path}' 不存在，已跳过。")
+        added_files_meta = []
+        for src_path in source_file_paths:
+            if not os.path.exists(src_path):
+                logging.warning(f"源文件 '{src_path}' 不存在，已跳过。")
+                continue
 
-            # 使用复制后的路径进行处理
-            file_paths_for_processing = processed_file_paths
-        else:
-            file_paths_for_processing = None
+            file_name = os.path.basename(src_path)
+            # 1. 检查元数据中文件名是否重复
+            if self.group_manager.get_file_by_name(group_id, file_name):
+                logging.warning(f"文件名 '{file_name}' 已存在于组中，已跳过。")
+                continue
 
-        # 2. 调用 DataProcessor 处理数据并生成节点
-        nodes = self.data_processor.process_data(
-            group_id=group_id, file_paths=file_paths_for_processing, urls=urls
-        )
+            # 2. 复制物理文件
+            dest_path = os.path.join(group_dir, file_name)
+            try:
+                shutil.copy(src_path, dest_path)
+                file_size = os.path.getsize(dest_path)
+            except (IOError, OSError) as e:
+                logging.error(f"复制文件 '{src_path}' 到组目录失败: {e}")
+                continue  # 继续处理下一个文件
 
-        if not nodes:
-            logging.warning(f"没有为组 '{group_id}' 生成任何新节点。")
-            return
-
-        # 3. 将节点插入索引
-        initial_count = self.chroma_collection.count()
-        self.index.insert_nodes(nodes)
-        final_count = self.chroma_collection.count()
-
-        new_items = final_count - initial_count
-        if new_items > 0:
-            logging.info(
-                f"成功为组 '{group_id}' 添加或更新了 {new_items} 个节点到索引。"
+            # 3. 添加文件元数据
+            file_meta = self.group_manager.add_file_meta(
+                group_id, file_name, file_size
             )
-        else:
-            logging.info(f"数据已处理，但未向索引添加任何新节点（可能已是最新）。")
+            if file_meta:
+                # 为下一步处理添加物理路径
+                file_meta["physical_path"] = dest_path
+                added_files_meta.append(file_meta)
+
+        if not added_files_meta:
+            logging.info("没有新文件被添加到组中。")
+            return []
+
+        # 4. 为新添加的文件创建并插入向量
+        logging.info(f"开始为 {len(added_files_meta)} 个新文件创建索引...")
+        nodes = self.data_processor.process_data(
+            group_id=group_id, files_meta=added_files_meta
+        )
+        if nodes:
+            self.index.insert_nodes(nodes)
+            logging.info(f"成功为 {len(added_files_meta)} 个新文件创建并插入了向量。")
+        
+        return added_files_meta
+
+    def add_urls_to_group(self, group_id: str, urls: List[str]) -> List[Dict]:
+        """
+        向指定组中添加多个URL，处理元数据和向量索引。
+        """
+        group_meta = self.group_manager.get_group_by_id(group_id)
+        if not group_meta:
+            logging.error(f"添加URL失败：找不到组 (ID: {group_id})。")
+            return []
+
+        added_webpages_meta = []
+        for url in urls:
+            # 1. 检查元数据中URL是否重复
+            if self.group_manager.get_webpage_by_url(group_id, url):
+                logging.warning(f"URL '{url}' 已存在于组中，已跳过。")
+                continue
+            
+            # 2. 添加网页元数据
+            webpage_meta = self.group_manager.add_webpage_meta(group_id, url)
+            if webpage_meta:
+                added_webpages_meta.append(webpage_meta)
+
+        if not added_webpages_meta:
+            logging.info("没有新URL被添加到组中。")
+            return []
+
+        # 3. 为新添加的URL创建并插入向量
+        logging.info(f"开始为 {len(added_webpages_meta)} 个新URL创建索引...")
+        nodes = self.data_processor.process_data(
+            group_id=group_id, webpages_meta=added_webpages_meta
+        )
+        if nodes:
+            self.index.insert_nodes(nodes)
+            logging.info(f"成功为 {len(added_webpages_meta)} 个新URL创建并插入了向量。")
+            
+        return added_webpages_meta
 
     def list_all_groups(self) -> List[Dict]:
         """
@@ -201,98 +244,85 @@ class RAGPipeline:
 
         return success
 
-    def list_sources_in_group(self, group_id: str) -> List[Dict[str, str]]:
+    def list_sources_in_group(self, group_id: str) -> Dict[str, List[Dict]]:
         """
-        列出指定组内的所有数据源，包括物理文件和网页。
-
-        Returns:
-            一个字典列表，每个字典代表一个数据源，包含 'type' 和 'name'。
+        列出指定组内的所有数据源，包括文件和网页。
+        数据直接来自作为唯一可信源的元数据文件。
         """
-        # 步骤 1: 获取物理文件
-        physical_files = self.group_manager.list_files_in_group(group_id)
+        files = self.group_manager.list_files_metadata(group_id)
+        webpages = self.group_manager.list_webpages_metadata(group_id)
+        return {"files": files, "webpages": webpages}
 
-        # 步骤 2: 从 ChromaDB 获取所有数据源标识 (包括文件和网页)
-        # 这样可以确保即使物理文件被删除但DB中还有残留，也能被发现
-        try:
-            # get() 方法可以带 where 过滤器和 include=['metadatas'] 来只获取元数据
-            results = self.chroma_collection.get(
-                where={"group_id": group_id}, include=["metadatas"]
-            )
-            metadatas = results.get("metadatas", [])
-        except Exception as e:
-            logging.error(f"从 ChromaDB 获取组 '{group_id}' 的元数据失败: {e}")
-            metadatas = []
-
-        # 步骤 3: 合并和去重
-        all_source_names: Set[str] = set(physical_files)
-        for meta in metadatas:
-            if "file_name" in meta:
-                all_source_names.add(meta["file_name"])
-
-        # 步骤 4: 格式化输出
-        sources = []
-        for name in sorted(list(all_source_names)):
-            source_type = "web" if name.startswith(("http://", "https://")) else "file"
-            sources.append({"type": source_type, "name": name})
-
-        return sources
-
-    def delete_sources_from_group(
-        self, group_id: str, sources_to_delete: List[str]
-    ) -> bool:
+    def delete_files_from_group(self, group_id: str, file_ids: List[str]) -> bool:
         """
-        从一个组中删除指定的数据源。
-
-        Args:
-            group_id: 组的 ID。
-            sources_to_delete: 一个包含文件名或 URL 的列表。
-
-        Returns:
-            操作是否完全成功。
+        从一个组中彻底删除指定的文件。
+        顺序: 向量数据库 -> 物理文件 -> 元数据
         """
-        if not sources_to_delete:
-            logging.warning("没有指定要删除的数据源，操作跳过。")
+        if not file_ids:
+            return True
+        
+        logging.info(f"准备从组 '{group_id}' 删除 {len(file_ids)} 个文件...")
+        all_success = True
+
+        for file_id in file_ids:
+            file_meta = self.group_manager.get_file_by_id(group_id, file_id)
+            if not file_meta:
+                logging.warning(f"找不到文件ID '{file_id}'，跳过删除。")
+                continue
+
+            file_name = file_meta['name']
+            logging.info(f"正在删除文件 '{file_name}' (ID: {file_id})...")
+
+            try:
+                # 1. 从ChromaDB删除节点
+                self.chroma_collection.delete(where={"file_id": file_id})
+                logging.info(f"  - 已从向量数据库删除 '{file_name}' 的节点。")
+
+                # 2. 删除物理文件
+                group_physical_path = self.group_manager.get_group_physical_path(group_id)
+                if group_physical_path:
+                    file_to_delete = os.path.join(group_physical_path, file_meta['path'])
+                    if os.path.exists(file_to_delete):
+                        os.remove(file_to_delete)
+                        logging.info(f"  - 已删除物理文件: {file_to_delete}")
+
+                # 3. 从元数据文件删除记录
+                if self.group_manager.remove_file_meta(group_id, file_id):
+                    logging.info(f"  - 已从元数据中删除 '{file_name}'。")
+                
+            except Exception as e:
+                logging.error(f"删除文件 '{file_name}' (ID: {file_id}) 时发生严重错误: {e}", exc_info=True)
+                all_success = False
+        
+        return all_success
+        
+    def delete_webpages_from_group(self, group_id: str, webpage_ids: List[str]) -> bool:
+        """
+        从一个组中彻底删除指定的网页。
+        顺序: 向量数据库 -> 元数据
+        """
+        if not webpage_ids:
             return True
 
-        logging.info(f"开始从组 '{group_id}' 删除 {len(sources_to_delete)} 个数据源...")
+        logging.info(f"准备从组 '{group_id}' 删除 {len(webpage_ids)} 个网页...")
+        all_success = True
 
-        # 步骤 1: 从 ChromaDB 删除与这些源相关的节点
-        try:
-            # 构建一个复杂的 where 子句: (group_id == X) AND (file_name IN [s1, s2, ...])
-            # ChromaDB 的 $and 操作符是隐式的，直接提供多个条件即可
-            where_clause = {
-                "group_id": group_id,
-                "file_name": {"$in": sources_to_delete},
-            }
-            self.chroma_collection.delete(where=where_clause)
-            logging.info(f"已向 ChromaDB 发送删除与指定源相关的节点的请求。")
-        except Exception as e:
-            logging.error(f"从 ChromaDB 删除节点时发生错误: {e}", exc_info=True)
-            return False
+        for page_id in webpage_ids:
+            logging.info(f"正在删除网页 (ID: {page_id})...")
+            try:
+                # 1. 从ChromaDB删除节点
+                self.chroma_collection.delete(where={"webpage_id": page_id})
+                logging.info(f"  - 已从向量数据库删除网页 (ID: {page_id}) 的节点。")
 
-        # 步骤 2: 从物理存储中删除文件
-        group_physical_path = self.group_manager.get_group_physical_path(group_id)
-        if not group_physical_path:
-            logging.warning(f"无法找到组 '{group_id}' 的物理路径，跳过文件删除。")
-            return True  # 如果目录不存在，文件删除操作可视为成功
+                # 2. 从元数据文件删除记录
+                if self.group_manager.remove_webpage_meta(group_id, page_id):
+                    logging.info(f"  - 已从元数据中删除网页 (ID: {page_id})。")
 
-        for source_name in sources_to_delete:
-            # 只删除不是 URL 的源
-            if not source_name.startswith(("http://", "https://")):
-                file_path = os.path.join(group_physical_path, source_name)
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                        logging.info(f"成功删除物理文件: {file_path}")
-                    except OSError as e:
-                        logging.error(f"删除物理文件 '{file_path}' 失败: {e}")
-                        # 即使一个文件删除失败，也应继续尝试删除其他文件
-                        # 但最终应返回失败状态
-                        # 这里我们简单记录错误，最后返回成功（取决于业务需求）
-                        # 更健壮的做法是收集错误并最后决定返回值
-
-        logging.info(f"数据源删除流程完成。")
-        return True
+            except Exception as e:
+                logging.error(f"删除网页 (ID: {page_id}) 时发生严重错误: {e}", exc_info=True)
+                all_success = False
+        
+        return all_success
 
     def chat(
         self, query_text: str, chat_history: List[Dict[str, str]], group_ids: Optional[List[str]] = None

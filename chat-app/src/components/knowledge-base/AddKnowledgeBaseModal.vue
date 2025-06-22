@@ -24,17 +24,17 @@
         </div>
         <div class="form-item">
           <label for="embedding-model">嵌入模型</label>
-          <select id="embedding-model" v-model="embeddingModel">
-            <option value="text-embedding-ada-002">text-embedding-ada-002</option>
-            <option value="qwen-text-embedding-v1">qwen-text-embedding-v1</option>
+          <select id="embedding-model" v-model="embeddingModel" disabled>
+            <option value="BAAI/bge-m3">BAAI/bge-m3</option>
           </select>
+          <div class="model-hint">当前仅支持 BAAI/bge-m3 模型</div>
         </div>
         <div class="form-item">
           <label for="rerank-model">重排模型</label>
-          <select id="rerank-model" v-model="rerankModel">
-            <option value="bge-reranker-base">bge-reranker-base</option>
-            <option value="cohere-rerank-english-v2.0">cohere-rerank-english-v2.0</option>
+          <select id="rerank-model" v-model="rerankModel" disabled>
+            <option value="BAAI/bge-reranker-v2-m3">BAAI/bge-reranker-v2-m3</option>
           </select>
+          <div class="model-hint">当前仅支持 BAAI/bge-reranker-v2-m3 模型</div>
         </div>
         <div class="separator"></div>
         <div class="setting-item">
@@ -49,10 +49,22 @@
             <label for="auto-dimension-toggle" class="switch-label"></label>
           </div>
         </div>
+        
+        <!-- 错误消息显示 -->
+        <div v-if="errorMessage" class="error-message">
+          {{ errorMessage }}
+        </div>
       </div>
       <div class="modal-footer">
-        <button class="cancel-button" @click="emit('close')">取消</button>
-        <button class="create-button" :disabled="!isFormValid">创建</button>
+        <button class="cancel-button" @click="emit('close')" :disabled="isCreating">取消</button>
+        <button 
+          class="create-button" 
+          :disabled="!isFormValid || isCreating" 
+          @click="createKnowledgeBase"
+        >
+          <span v-if="isCreating">创建中...</span>
+          <span v-else>创建</span>
+        </button>
       </div>
     </div>
   </div>
@@ -61,18 +73,48 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import Icon from '@/components/AppIcon.vue'
+import { useKnowledgeBaseStore } from '@/stores/knowledgeBase'
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'created'])
+
+const knowledgeBaseStore = useKnowledgeBaseStore()
 
 const name = ref('')
 const description = ref('')
-const embeddingModel = ref('text-embedding-ada-002')
-const rerankModel = ref('bge-reranker-base')
+const embeddingModel = ref('BAAI/bge-m3')
+const rerankModel = ref('BAAI/bge-reranker-v2-m3')
 const autoDimension = ref(true)
 
+const isCreating = ref(false)
+const errorMessage = ref('')
+
 const isFormValid = computed(() => {
-  return name.value.trim() !== '' && embeddingModel.value !== '' && rerankModel.value !== ''
+  return name.value.trim() !== ''
 })
+
+async function createKnowledgeBase() {
+  if (!isFormValid.value || isCreating.value) return
+  
+  isCreating.value = true
+  errorMessage.value = ''
+  
+  try {
+    const desc = description.value.trim() || "";
+    const newGroup = await knowledgeBaseStore.createGroup(name.value, desc)
+    
+    if (newGroup) {
+      emit('created', newGroup)
+      emit('close')
+    } else {
+      errorMessage.value = '创建知识库失败，请重试'
+    }
+  } catch (error) {
+    console.error('创建知识库时出错:', error)
+    errorMessage.value = '创建知识库时发生错误'
+  } finally {
+    isCreating.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -298,5 +340,19 @@ const isFormValid = computed(() => {
 
 .switch-input:checked + .switch-label:before {
   transform: translateX(20px);
+}
+
+/* Model Hint */
+.model-hint {
+  font-size: 0.8em;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* Error Message */
+.error-message {
+  color: var(--text-error);
+  font-size: 0.8em;
+  margin-top: 8px;
 }
 </style> 

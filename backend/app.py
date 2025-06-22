@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 from flask import Flask
+from flask_cors import CORS
 
 # 将 rag_engine 的父目录（即项目根目录）添加到 Python 路径中
 # 这样可以确保可以导入 rag_engine 模块
@@ -19,6 +20,9 @@ def create_app() -> Flask:
     """
     app = Flask(__name__)
     app.config.from_object(BackendConfig())
+    
+    # 启用CORS
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
 
     # 设置日志记录
     logging.basicConfig(
