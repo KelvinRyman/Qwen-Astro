@@ -2,15 +2,26 @@
   <div class="search-overlay" @click.self="$emit('close')">
     <div class="search-modal-content">
       <div class="search-header">
-        <input type="text" class="search-input" placeholder="搜索聊天..." />
+        <input 
+          type="text" 
+          class="search-input" 
+          placeholder="搜索聊天..." 
+          v-model="searchQuery" 
+          @input="handleSearch"
+          ref="searchInput"
+        />
         <button class="close-button" @click="$emit('close')">
           <Icon name="close" />
         </button>
       </div>
       <div class="search-body">
+        <!-- 加载状态 -->
+        <div v-if="isLoading" class="loading-state">
+          <span>正在搜索...</span>
+        </div>
         <!-- 如果聊天记录为空 -->
-        <div v-if="chatHistory.length === 0" class="empty-state">
-          <a href="#" class="new-chat-link">
+        <div v-else-if="chatHistory.length === 0" class="empty-state">
+          <a href="#" class="new-chat-link" @click.prevent="createNewChat">
             <Icon name="new_chat" />
             <span>新聊天</span>
           </a>
@@ -19,7 +30,7 @@
         <!-- 如果有聊天记录，则渲染列表 -->
         <div v-else class="history-list">
           <!-- "新聊天"按钮始终在顶部 -->
-          <a href="#" class="new-chat-link">
+          <a href="#" class="new-chat-link" @click.prevent="createNewChat">
             <Icon name="new_chat" />
             <span>新聊天</span>
           </a>
@@ -28,7 +39,13 @@
           <div v-for="group in chatHistory" :key="group.title" class="history-group">
             <div class="group-title">{{ group.title }}</div>
             <!-- 循环渲染分组内的项目 -->
-            <a v-for="item in group.items" :key="item.id" href="#" class="history-item">
+            <a 
+              v-for="item in group.items" 
+              :key="item.id" 
+              href="#" 
+              class="history-item"
+              @click.prevent="selectChat(item.id)"
+            >
               <Icon name="chat" />
               <span>{{ item.title }}</span>
             </a>
@@ -42,12 +59,53 @@
 <script setup lang="ts">
 import Icon from './AppIcon.vue';
 import { useChatStore } from '@/stores/chat';
+import { ref, computed, onMounted, nextTick } from 'vue';
+import { useRouter } from 'vue-router';
 
-defineEmits(['close']);
+const emit = defineEmits(['close']);
 
+const router = useRouter();
 const chatStore = useChatStore();
-const { chatHistory } = chatStore;
+const searchQuery = ref('');
+const searchInput = ref<HTMLInputElement | null>(null);
+const isLoading = computed(() => chatStore.isLoading);
+const chatHistory = computed(() => chatStore.chatHistory);
 
+// 在组件挂载时加载对话列表并聚焦搜索框
+onMounted(async () => {
+  if (!chatStore.chatHistory.length) {
+    await chatStore.loadConversations();
+  }
+  nextTick(() => {
+    if (searchInput.value) {
+      searchInput.value.focus();
+    }
+  });
+});
+
+// 防抖处理搜索
+let searchTimeout: number | null = null;
+const handleSearch = () => {
+  if (searchTimeout) {
+    clearTimeout(searchTimeout);
+  }
+  searchTimeout = setTimeout(async () => {
+    await chatStore.searchConversations(searchQuery.value);
+  }, 300) as unknown as number;
+};
+
+// 选择聊天
+const selectChat = (chatId: string) => {
+  router.push(`/chat/${chatId}`);
+  emit('close');
+};
+
+// 创建新对话
+const createNewChat = async () => {
+  chatStore.prepareNewChat();
+  router.push('/chat');
+  emit('close');
+};
 </script>
 
 <style scoped>
@@ -125,6 +183,14 @@ const { chatHistory } = chatStore;
 .empty-state {
   display: flex;
   flex-direction: column;
+}
+
+.loading-state {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100px;
+  color: var(--text-secondary);
 }
 
 .new-chat-link {

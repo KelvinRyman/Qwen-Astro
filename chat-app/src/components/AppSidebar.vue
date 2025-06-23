@@ -16,7 +16,7 @@
 
     <div class="sidebar-content">
       <div class="sidebar-section">
-        <a href="#" class="sidebar-link" @click.prevent="router.push('/')">
+        <a href="#" class="sidebar-link" @click.prevent="createNewChat">
           <Icon name="new_chat" />
           <span class="link-text">新聊天</span>
         </a>
@@ -37,8 +37,17 @@
         <div class="section-title">
           <span class="link-text">聊天</span>
         </div>
+        <!-- 加载状态 -->
+        <div v-if="isLoading" class="loading-indicator">
+          <span class="link-text">加载中...</span>
+        </div>
+        <!-- 空状态 -->
+        <div v-else-if="allChats.length === 0" class="empty-state">
+          <span class="link-text">暂无聊天记录</span>
+        </div>
         <!-- 聊天历史记录 -->
         <div
+          v-else
           v-for="item in allChats"
           :key="item.id"
           class="chat-item-wrapper"
@@ -93,7 +102,7 @@ import Icon from './AppIcon.vue'
 import ItemDropdownMenu from './ItemDropdownMenu.vue'
 import { useRouter } from 'vue-router';
 import { useChatStore, type ChatGroup } from '@/stores/chat';
-import { computed, ref } from 'vue';
+import { computed, ref, onMounted } from 'vue';
 
 defineProps<{
   isCollapsed: boolean;
@@ -105,27 +114,34 @@ const router = useRouter();
 const chatStore = useChatStore();
 const isRenameModalVisible = ref(false);
 const newChatTitle = ref('');
-const currentChatId = ref<number | null>(null);
-const openMenuId = ref<number | null>(null);
+const currentChatId = ref<string | null>(null);
+const openMenuId = ref<string | null>(null);
+const isLoading = computed(() => chatStore.isLoading);
 
+// 获取所有聊天
 const allChats = computed(() => {
   return chatStore.chatHistory.flatMap((group: ChatGroup) => group.items);
 });
 
+// 在组件挂载时加载对话列表
+onMounted(async () => {
+  await chatStore.loadConversations();
+});
+
 // 选择聊天
-const selectChat = (chatId: number) => {
+const selectChat = (chatId: string) => {
   if (openMenuId.value === chatId) {
     return;
   }
   router.push(`/chat/${chatId}`);
 };
 
-const toggleMenu = (chatId: number) => {
+const toggleMenu = (chatId: string) => {
   openMenuId.value = openMenuId.value === chatId ? null : chatId;
 };
 
 // 重命名聊天
-const handleRenameChat = (chatId: number) => {
+const handleRenameChat = (chatId: string) => {
   openMenuId.value = null; // Close dropdown menu
   const chat = allChats.value.find(item => item.id === chatId);
   if (chat) {
@@ -136,19 +152,25 @@ const handleRenameChat = (chatId: number) => {
 };
 
 // 确认重命名
-const confirmRenameChat = () => {
+const confirmRenameChat = async () => {
   if (currentChatId.value !== null && newChatTitle.value.trim()) {
-    chatStore.renameChat(currentChatId.value, newChatTitle.value);
+    await chatStore.renameChat(currentChatId.value, newChatTitle.value);
     isRenameModalVisible.value = false;
   }
 };
 
 // 删除聊天
-const handleDeleteChat = (chatId: number) => {
+const handleDeleteChat = async (chatId: string) => {
   openMenuId.value = null; // Close dropdown menu
   if (confirm('确定要删除这个对话吗？此操作不可恢复。')) {
-    chatStore.deleteChat(chatId);
+    await chatStore.deleteChat(chatId);
   }
+};
+
+// 创建新对话
+const createNewChat = async () => {
+  chatStore.prepareNewChat();
+  router.push('/chat');
 };
 </script>
 
@@ -359,6 +381,19 @@ const handleDeleteChat = (chatId: number) => {
 }
 .sidebar-footer {
   padding: 8px 4px;
+}
+
+/* 加载指示器和空状态 */
+.loading-indicator, .empty-state {
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  text-align: center;
+  margin: 8px 0;
+}
+
+.empty-state {
+  font-style: italic;
 }
 
 /* 模态框样式 */

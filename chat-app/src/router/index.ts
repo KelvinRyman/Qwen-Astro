@@ -7,6 +7,15 @@ const router = createRouter({
   routes: [
     {
       path: '/',
+      redirect: '/chat'
+    },
+    {
+      path: '/chat',
+      name: 'NewChat',
+      component: ChatView,
+    },
+    {
+      path: '/chat/:id',
       name: 'Chat',
       component: ChatView,
     },

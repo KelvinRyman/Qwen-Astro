@@ -1,8 +1,41 @@
 <template>
   <div class="chat-view">
-    <div class="welcome-container">
+    <!-- 欢迎界面：只在新对话模式且没有消息时显示 -->
+    <div v-if="isNewChatMode && !hasMessages" class="welcome-container">
       <h1>{{ currentWelcomeMessage }}</h1>
     </div>
+    
+    <!-- 消息列表：当有消息或非新对话模式时显示 -->
+    <div v-else ref="messagesContainerRef" class="messages-container">
+      <div v-if="isLoading" class="loading-message">加载中...</div>
+      <div v-else-if="currentConversation">
+        <div v-for="(message, index) in currentConversation.messages" :key="index" class="message-wrapper">
+          <!-- 用户消息 -->
+          <div v-if="message.role === 'user'" class="user-message">
+            {{ message.content }}
+          </div>
+          
+          <!-- 助手消息 -->
+          <div v-else class="assistant-message-wrapper">
+            <div class="assistant-message">
+              {{ message.content }}
+              <span v-if="message.isGenerating" class="generating-cursor"></span>
+            </div>
+            <!-- 只在消息生成完毕后显示操作按钮 -->
+            <div v-if="!message.isGenerating" class="message-actions">
+              <button class="message-action-button">
+                <Icon name="copy" />
+              </button>
+              <button class="message-action-button">
+                <Icon name="refresh" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 输入区域：始终显示 -->
     <div class="input-container">
       <div class="input-box-wrapper">
         <textarea
@@ -12,6 +45,7 @@
           placeholder="询问任何问题"
           rows="1"
           @input="handleInput"
+          @keydown.enter.prevent="handleEnterKey"
         ></textarea>
         <div class="input-actions">
           <div class="actions-left">
@@ -41,6 +75,8 @@
             <button
               class="input-icon-button send-button"
               :class="{ 'has-text': chatInputText.trim() !== '' }"
+              @click="sendMessage"
+              :disabled="isGenerating || !chatInputText.trim()"
             >
               <Icon name="send" />
             </button>
@@ -52,8 +88,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import Icon from '../components/AppIcon.vue'
+import { useChatStore } from '@/stores/chat'
 
 const welcomeMessages = [
   '一小步和一大步。',
@@ -69,16 +107,47 @@ const welcomeMessages = [
 const currentWelcomeMessage = ref('')
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const chatInputText = ref('') // 用于绑定 textarea 内容
+const messagesContainerRef = ref<HTMLElement | null>(null)
 
 const isToolMenuOpen = ref(false)
 const toolMenuContainerRef = ref<HTMLElement | null>(null)
 
+// 获取路由和聊天存储
+const route = useRoute()
+const chatStore = useChatStore()
+
+// 计算属性
+const isNewChatMode = computed(() => chatStore.isNewChatMode)
+const isLoading = computed(() => chatStore.isLoading)
+const isGenerating = computed(() => chatStore.isGeneratingMessage)
+const currentConversation = computed(() => chatStore.currentConversation)
+const hasMessages = computed(() => 
+  currentConversation.value && currentConversation.value.messages.length > 0
+)
+
+// 监听消息变化，自动滚动到底部
+watch(() => currentConversation.value?.messages, () => {
+  scrollToBottom()
+}, { deep: true })
+
+// 滚动到底部
+const scrollToBottom = () => {
+  nextTick(() => {
+    const container = messagesContainerRef.value
+    if (container) {
+      container.scrollTop = container.scrollHeight
+    }
+  })
+}
+
+// 处理点击外部关闭工具菜单
 const handleClickOutside = (event: MouseEvent) => {
   if (toolMenuContainerRef.value && !toolMenuContainerRef.value.contains(event.target as Node)) {
     isToolMenuOpen.value = false
   }
 }
 
+// 处理输入框高度自适应
 const handleInput = () => {
   const textarea = textareaRef.value
   if (textarea) {
@@ -87,10 +156,51 @@ const handleInput = () => {
   }
 }
 
-onMounted(() => {
+// 处理回车键发送消息
+const handleEnterKey = (event: KeyboardEvent) => {
+  // 如果按下Shift+Enter，则插入换行符
+  if (event.shiftKey) {
+    return
+  }
+  // 否则发送消息
+  sendMessage()
+}
+
+// 发送消息
+const sendMessage = async () => {
+  const message = chatInputText.value.trim()
+  if (!message || isGenerating.value) return
+  
+  // 立即清空输入框
+  chatInputText.value = ''
+  
+  // 重置输入框高度
+  if (textareaRef.value) {
+    textareaRef.value.style.height = 'auto'
+  }
+  
+  // 发送消息
+  await chatStore.sendMessage(message)
+  
+  // 滚动到底部
+  scrollToBottom()
+}
+
+// 组件挂载时
+onMounted(async () => {
+  // 设置随机欢迎消息
   const randomIndex = Math.floor(Math.random() * welcomeMessages.length)
   currentWelcomeMessage.value = welcomeMessages[randomIndex]
+  
+  // 添加点击外部关闭菜单的事件监听
   document.addEventListener('click', handleClickOutside)
+  
+  // 如果路由中有conversationId，加载该对话
+  const conversationId = route.params.id as string
+  if (conversationId) {
+    await chatStore.loadConversation(conversationId)
+    scrollToBottom()
+  }
 })
 
 onUnmounted(() => {
@@ -106,6 +216,7 @@ onUnmounted(() => {
   height: 100vh;
   background-color: var(--bg-secondary);
   position: relative;
+  overflow-x: hidden; /* 防止水平滚动 */
 }
 
 .welcome-container {
@@ -119,6 +230,113 @@ onUnmounted(() => {
   font-size: 2.5em;
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+.messages-container {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.loading-message {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-secondary);
+  font-size: 16px;
+}
+
+.message-wrapper {
+  margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  max-width: 800px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+}
+
+/* 用户消息样式 */
+.user-message {
+  align-self: flex-end;
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  padding: 14px;
+  border-radius: var(--border-radius-large);
+  max-width: 80%;
+  word-break: break-word;
+  line-height: 1.5;
+  font-size: 16px;
+}
+
+/* 助手消息容器 */
+.assistant-message-wrapper {
+  align-self: flex-start;
+  max-width: 80%;
+  position: relative;
+}
+
+/* 助手消息样式 */
+.assistant-message {
+  color: var(--text-primary);
+  line-height: 1.5;
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+/* 生成中的光标效果 */
+.generating-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background-color: var(--text-primary);
+  margin-left: 2px;
+  animation: blink 1s infinite;
+  vertical-align: middle;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* 消息操作按钮 */
+.message-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.assistant-message-wrapper:hover .message-actions {
+  opacity: 1;
+}
+
+.message-action-button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.message-action-button:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.message-action-button :deep(svg) {
+  font-size: 18px;
 }
 
 .input-container {

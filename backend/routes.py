@@ -1,7 +1,7 @@
 import os
 import uuid
 import threading
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import HTTPException
 from pydantic import ValidationError
@@ -542,3 +542,69 @@ def search_conversations():
     pipeline = get_rag_pipeline()
     results = pipeline.conversation_manager.search_conversations(query)
     return jsonify(results), 200
+
+
+@api.route("/conversations/<conversation_id>/messages/stream", methods=["POST"])
+def stream_message_to_conversation(conversation_id: str):
+    """向指定对话发送消息并获取流式回复。"""
+    pipeline = get_rag_pipeline()
+
+    # 1. 验证对话是否存在
+    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+
+    # 2. 验证请求数据
+    try:
+        data = MessagePostRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    # 3. 准备聊天历史和上下文
+    chat_history = conversation.get("messages", [])
+    group_ids = conversation.get("group_ids", [])
+
+    # 4. 创建流式响应生成器
+    def generate():
+        try:
+            # 注意：这里假设RAG引擎支持流式响应
+            # 如果不支持，需要修改RAG引擎或模拟流式响应
+            response = pipeline.chat(
+                query_text=data.message,
+                chat_history=chat_history,
+                group_ids=group_ids,
+            )
+            
+            # 保存用户消息到历史记录
+            pipeline.conversation_manager.add_message_to_conversation(
+                conversation_id, "user", data.message
+            )
+            
+            # 模拟流式输出（实际实现应该从LLM获取流式输出）
+            answer = str(response)
+            source_nodes = []
+            if hasattr(response, "source_nodes") and response.source_nodes:
+                source_nodes = [
+                    SourceNodeModel.from_source_node(n) for n in response.source_nodes
+                ]
+            
+            # 保存助手消息到历史记录
+            pipeline.conversation_manager.add_message_to_conversation(
+                conversation_id, "assistant", answer
+            )
+            
+            # 构建完整响应
+            full_response = QueryResponse(
+                answer=answer,
+                sources=source_nodes,
+            )
+            
+            # 返回JSON格式的完整响应
+            yield full_response.model_dump_json()
+            
+        except Exception as e:
+            current_app.logger.error(f"流式聊天处理期间出错: {e}", exc_info=True)
+            yield jsonify({"error": "处理聊天时发生内部错误。"}).get_data(as_text=True)
+
+    # 设置响应头并返回流式响应
+    return Response(generate(), mimetype='application/json')

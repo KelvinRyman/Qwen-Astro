@@ -96,15 +96,15 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', {
       try {
         this.groups = await knowledgeBaseApi.getGroups()
         
-        // 默认选中第一个
-        if (this.groups.length > 0 && !this.activeGroupId) {
-          this.selectGroup(this.groups[0].id)
-        }
+      // 默认选中第一个
+      if (this.groups.length > 0 && !this.activeGroupId) {
+        this.selectGroup(this.groups[0].id)
+      }
       } catch (error) {
         console.error('获取知识库组失败:', error)
         this.error = '获取知识库组失败'
       } finally {
-        this.isLoadingGroups = false
+      this.isLoadingGroups = false
       }
     },
 
@@ -293,13 +293,13 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', {
     // 刷新文件状态
     async refreshFileStatus(fileId: string) {
       if (!this.activeGroupId) return
-      
+
       try {
         const status = await knowledgeBaseApi.getFileStatus(this.activeGroupId, fileId)
         
         // 更新本地状态
-        const groupContent = this.contentByGroupId[this.activeGroupId]
-        if (groupContent) {
+      const groupContent = this.contentByGroupId[this.activeGroupId]
+      if (groupContent) {
           const file = groupContent.files.find(f => f.id === fileId)
           if (file) {
             file.status = status as 'completed' | 'processing' | 'failed'
@@ -313,17 +313,17 @@ export const useKnowledgeBaseStore = defineStore('knowledgeBase', {
     // 刷新网页状态
     async refreshWebpageStatus(urlId: string) {
       if (!this.activeGroupId) return
-      
+
       try {
         const status = await knowledgeBaseApi.getWebpageStatus(this.activeGroupId, urlId)
         
         // 更新本地状态
-        const groupContent = this.contentByGroupId[this.activeGroupId]
-        if (groupContent) {
+      const groupContent = this.contentByGroupId[this.activeGroupId]
+      if (groupContent) {
           const url = groupContent.urls.find(u => u.id === urlId)
           if (url) {
             url.status = status as 'completed' | 'processing' | 'failed'
-          }
+      }
         }
       } catch (error) {
         console.error('刷新网页状态失败:', error)
