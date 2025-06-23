@@ -29,8 +29,11 @@
 ### 安装依赖
 
 ```bash
-# 安装后端依赖
+# 使用pip安装后端依赖
 pip install -r requirements.txt
+
+# 或者使用uv安装后端依赖（推荐）
+uv pip install -r requirements.txt
 
 # 安装前端依赖
 cd chat-app
@@ -55,17 +58,19 @@ cd chat-app
 npm run dev
 ```
 
-### 测试API
+### 使用uv运行项目
 
 ```bash
-# 测试API端点
-./test_api.ps1
+# 安装uv（如果尚未安装）
+pipx install uv
 
-# 查看所有会话
-./list_conversations.ps1
+# 创建并激活虚拟环境并安装项目依赖
+uv sync
 
-# 检查服务器状态
-./check_server.ps1
+# 运行项目
+$env:FLASK_APP="backend.app"  # Windows
+export FLASK_APP="backend.app"  # Linux/macOS
+flask run
 ```
 
 ## API文档
