@@ -62,7 +62,13 @@ export const useChatStore = defineStore('chat', () => {
   // 准备新对话（不立即创建）
   function prepareNewChat() {
     isNewChatMode.value = true;
-    currentConversation.value = null;
+    currentConversation.value = {
+      id: '',
+      title: '新对话',
+      created_at: new Date().toISOString(),
+      group_ids: null,
+      messages: []
+    };
   }
 
   // 创建新对话（仅在发送第一条消息时调用）
@@ -118,6 +124,10 @@ export const useChatStore = defineStore('chat', () => {
       if (!currentConversation.value) return null;
       
       // 先乐观更新UI，添加用户消息
+      if (!currentConversation.value.messages) {
+        currentConversation.value.messages = [];
+      }
+      
       currentConversation.value.messages.push({
         role: 'user',
         content: message
@@ -242,9 +252,9 @@ export const useChatStore = defineStore('chat', () => {
         }
       });
       
-      // 如果删除的是当前对话，清空当前对话
+      // 如果删除的是当前对话，清空当前对话并准备新对话
       if (currentConversation.value && currentConversation.value.id === chatId) {
-        currentConversation.value = null;
+        prepareNewChat();
       }
       
       return true;

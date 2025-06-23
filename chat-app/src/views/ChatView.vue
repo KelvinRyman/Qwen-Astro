@@ -130,6 +130,18 @@ watch(() => currentConversation.value?.messages, () => {
   scrollToBottom()
 }, { deep: true })
 
+// 监听路由参数变化
+watch(() => route.params.id, async (newId) => {
+  if (newId) {
+    // 如果有新的conversationId，加载该对话
+    await chatStore.loadConversation(newId as string)
+    scrollToBottom()
+  } else {
+    // 如果没有conversationId，准备新对话模式
+    chatStore.prepareNewChat()
+  }
+})
+
 // 滚动到底部
 const scrollToBottom = () => {
   nextTick(() => {
@@ -200,6 +212,9 @@ onMounted(async () => {
   if (conversationId) {
     await chatStore.loadConversation(conversationId)
     scrollToBottom()
+  } else {
+    // 如果没有conversationId，准备新对话模式
+    chatStore.prepareNewChat()
   }
 })
 
