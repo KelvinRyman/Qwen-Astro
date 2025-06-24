@@ -6,12 +6,12 @@ from flask_cors import CORS
 
 # 将 rag_engine 的父目录（即项目根目录）添加到 Python 路径中
 # 这样可以确保可以导入 rag_engine 模块
-# project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# sys.path.insert(0, project_root)
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
 
 from rag_engine import RAGPipeline, config as engine_config
-from .config import BackendConfig
-from .routes import api
+from config import BackendConfig
+from routes import api
 
 
 def create_app() -> Flask:

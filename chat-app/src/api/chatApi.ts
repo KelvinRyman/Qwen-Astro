@@ -19,6 +19,7 @@ export interface Conversation {
   title: string;
   created_at: string;
   group_ids: string[] | null;
+  agent_id?: string | null;
   messages: Message[];
 }
 
@@ -28,6 +29,7 @@ export interface Message {
   timestamp?: string;
   isGenerating?: boolean;
   group_ids?: string[]; // 用户消息关联的知识库组ID
+  sources?: SourceNode[]; // 助手消息的引用来源
 }
 
 export interface ConversationSummary {
@@ -37,9 +39,21 @@ export interface ConversationSummary {
   last_message: string;
 }
 
+// 源节点接口，表示检索到的知识片段
+export interface SourceNode {
+  id: string;
+  score: number;
+  group_id: string;
+  file_name: string;
+  page_label: string;
+  text_snippet: string;
+  source_type: 'file' | 'webpage';  // 来源类型
+  source_url?: string;              // 网页URL（可选）
+}
+
 export interface QueryResponse {
   answer: string;
-  sources: any[];
+  sources: SourceNode[];
 }
 
 // 聊天API服务
@@ -57,8 +71,11 @@ export const chatApi = {
   },
 
   // 创建新对话
-  async createConversation(groupIds?: string[]): Promise<Conversation> {
-    const response = await apiClient.post('/conversations', { group_ids: groupIds });
+  async createConversation(groupIds?: string[], agentId?: string): Promise<Conversation> {
+    const response = await apiClient.post('/conversations', {
+      group_ids: groupIds,
+      agent_id: agentId
+    });
     return response.data;
   },
 

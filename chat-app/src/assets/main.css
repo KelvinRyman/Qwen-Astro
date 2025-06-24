@@ -20,6 +20,9 @@
   --button-danger-bg: #ED5E58;
   --button-danger-text: #FFFFFF;
   --button-secondary-bg: #40414F;
+  --interactive-label-accent-default: #99ceff;
+  --interactive-label-background-hover: #596975;
+  --interactive-label-background-default: #3c4044;
   --send-button-active-bg: #FFFFFF;
   --send-button-active-icon: #000000;
 

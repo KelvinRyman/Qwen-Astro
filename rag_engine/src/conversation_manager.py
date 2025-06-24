@@ -18,8 +18,8 @@ class ConversationManager:
     def _get_conv_path(self, conversation_id: str) -> str:
         return os.path.join(self.history_dir, f"{conversation_id}.json")
 
-    def create_conversation(self, conversation_id: str, group_ids: Optional[List[str]] = None) -> Dict:
-        """创建一个新的对话，包含一个可选的关联组ID列表。"""
+    def create_conversation(self, conversation_id: str, group_ids: Optional[List[str]] = None, agent_id: Optional[str] = None) -> Dict:
+        """创建一个新的对话，包含一个可选的关联组ID列表和Agent ID。"""
         conv_path = self._get_conv_path(conversation_id)
         if os.path.exists(conv_path):
             logging.warning(f"对话 {conversation_id} 已存在。")
@@ -30,6 +30,7 @@ class ConversationManager:
             "title": "新对话",  # 添加默认标题
             "created_at": datetime.now().isoformat(),
             "group_ids": group_ids or [],
+            "agent_id": agent_id,  # 添加Agent ID
             "messages": [],
         }
         with open(conv_path, "w", encoding="utf-8") as f:
@@ -44,16 +45,24 @@ class ConversationManager:
             return json.load(f)
 
     def add_message_to_conversation(
-        self, conversation_id: str, role: str, content: str
+        self, conversation_id: str, role: str, content: str, sources: Optional[List[Dict]] = None
     ):
         conversation = self.get_conversation(conversation_id)
         if not conversation:
             logging.error(f"尝试向不存在的对话 {conversation_id} 添加消息。")
             return
 
-        conversation["messages"].append(
-            {"role": role, "content": content, "timestamp": datetime.now().isoformat()}
-        )
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # 如果有sources数据，添加到消息中
+        if sources:
+            message["sources"] = sources
+
+        conversation["messages"].append(message)
         with open(self._get_conv_path(conversation_id), "w", encoding="utf-8") as f:
             json.dump(conversation, f, indent=4)
 

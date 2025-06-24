@@ -30,6 +30,11 @@
           
           <!-- 助手消息 -->
           <div v-else class="assistant-message-wrapper">
+            <!-- 引用卡片：在消息内容上方显示 -->
+            <CitationContainer
+              v-if="message.sources && message.sources.length > 0"
+              :sources="message.sources"
+            />
             <div class="assistant-message">
               {{ message.content }}
               <span v-if="message.isGenerating" class="generating-cursor"></span>
@@ -91,6 +96,15 @@
                 <Icon name="knowledge" />
               </button>
             </div>
+            <div ref="agentMenuContainerRef" class="agent-button-wrapper">
+              <button
+                class="input-icon-button"
+                :class="{ 'agent-selected': hasSelectedAgent }"
+                @click="toggleAgentModal"
+              >
+                <Icon name="agent" />
+              </button>
+            </div>
           </div>
           <div class="actions-right">
             <button class="input-icon-button">
@@ -110,12 +124,20 @@
     </div>
     
     <!-- 知识库选择弹窗 -->
-    <KnowledgeBaseSelectModal 
+    <KnowledgeBaseSelectModal
       v-if="isKnowledgeBaseModalOpen"
       :conversation-id="currentConversationId"
       :selected-group-ids="currentConversation?.group_ids || []"
       @close="isKnowledgeBaseModalOpen = false"
       @update="handleKnowledgeBaseUpdate"
+    />
+
+    <!-- Agent选择弹窗 -->
+    <AgentSelectModal
+      v-if="isAgentModalOpen"
+      :current-agent-id="currentConversation?.agent_id || null"
+      @close="isAgentModalOpen = false"
+      @select="handleAgentSelect"
     />
   </div>
 </template>
@@ -126,6 +148,8 @@ import { useRoute } from 'vue-router'
 import Icon from '@/components/AppIcon.vue'
 import { useChatStore } from '@/stores/chat'
 import KnowledgeBaseSelectModal from '@/components/KnowledgeBaseSelectModal.vue'
+import AgentSelectModal from '@/components/AgentSelectModal.vue'
+import CitationContainer from '@/components/CitationContainer.vue'
 
 const welcomeMessages = [
   '一小步和一大步。',
@@ -147,6 +171,8 @@ const isToolMenuOpen = ref(false)
 const toolMenuContainerRef = ref<HTMLElement | null>(null)
 const knowledgeMenuContainerRef = ref<HTMLElement | null>(null)
 const isKnowledgeBaseModalOpen = ref(false)
+const agentMenuContainerRef = ref<HTMLElement | null>(null)
+const isAgentModalOpen = ref(false)
 
 // 获取路由和聊天存储
 const route = useRoute()
@@ -168,6 +194,11 @@ const currentConversationId = computed(() =>
 const hasSelectedKnowledgeBase = computed(() => {
   const groupIds = getKnowledgeBaseGroupIds()
   return groupIds.length > 0
+})
+
+// 计算是否选择了Agent
+const hasSelectedAgent = computed(() => {
+  return currentConversation.value?.agent_id != null
 })
 
 // 复制文本到剪贴板
@@ -259,9 +290,10 @@ const sendMessage = async () => {
   }
 
   // 发送消息
-  // 获取要使用的知识库组ID
+  // 获取要使用的知识库组ID和Agent ID
   const groupIdsToUse = getKnowledgeBaseGroupIds()
-  await chatStore.sendMessage(message, groupIdsToUse)
+  const agentIdToUse = currentConversation.value?.agent_id || undefined
+  await chatStore.sendMessage(message, groupIdsToUse, agentIdToUse)
 
   // 滚动到底部
   scrollToBottom()
@@ -294,6 +326,11 @@ const toggleKnowledgeBaseModal = () => {
   isKnowledgeBaseModalOpen.value = !isKnowledgeBaseModalOpen.value
 }
 
+// 切换Agent选择弹窗
+const toggleAgentModal = () => {
+  isAgentModalOpen.value = !isAgentModalOpen.value
+}
+
 // 处理知识库更新
 const handleKnowledgeBaseUpdate = (selectedGroupIds: string[]) => {
   if (currentConversation.value) {
@@ -304,6 +341,17 @@ const handleKnowledgeBaseUpdate = (selectedGroupIds: string[]) => {
       // 如果是新对话模式，直接更新本地状态
       currentConversation.value.group_ids = selectedGroupIds
     }
+  }
+}
+
+// 处理Agent选择
+const handleAgentSelect = (agentId: string | null) => {
+  if (currentConversation.value) {
+    // 如果是新对话模式，直接更新本地状态
+    if (!currentConversation.value.id) {
+      currentConversation.value.agent_id = agentId
+    }
+    // 注意：已存在的对话不允许更改Agent，因为这会影响对话的一致性
   }
 }
 
@@ -606,7 +654,8 @@ onUnmounted(() => {
 }
 
 .tool-button-wrapper,
-.knowledge-button-wrapper {
+.knowledge-button-wrapper,
+.agent-button-wrapper {
   position: relative;
 }
 
@@ -651,11 +700,21 @@ onUnmounted(() => {
 
 /* 知识库按钮选中状态样式 */
 .input-icon-button.knowledge-selected {
-  background-color: #1e40af; /* 蓝色背景 */
-  color: #ffffff; /* 白色图标 */
+  background-color: var(--interactive-label-background-default); /* 蓝色背景 */
+  color: var(--interactive-label-accent-default);
 }
 
 .input-icon-button.knowledge-selected:hover {
-  background-color: #1d4ed8; /* 悬停时稍微深一点的蓝色 */
+  background-color: var(--interactive-label-background-hover); /* 悬停时稍微深一点的蓝色 */
+}
+
+/* Agent按钮选中状态样式 */
+.input-icon-button.agent-selected {
+  background-color: var(--interactive-label-background-default);
+  color: var(--interactive-label-accent-default);
+}
+
+.input-icon-button.agent-selected:hover {
+  background-color: var(--interactive-label-background-hover);
 }
 </style>

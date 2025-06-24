@@ -6,7 +6,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.exceptions import HTTPException
 from pydantic import ValidationError, Field
 
-from .models import (
+from models import (
     LegacyChatMessageRequest,
     GroupCreateRequest,
     QueryRequest,
@@ -24,6 +24,9 @@ from .models import (
     MessagesDeleteRequest,
     MessageRegenerateRequest,
     ConversationGroupsUpdateRequest,
+    AgentCreateRequest,
+    AgentUpdateRequest,
+    AgentResponse,
 )
 from rag_engine import RAGPipeline
 
@@ -228,32 +231,35 @@ def add_files_to_group(group_id: str):
         if file and file.filename:
             # 保留原始文件名（包括中文），不使用secure_filename
             original_filename = file.filename
-            
+
             # 检查文件名是否已存在于元数据中
             if pipeline.group_manager.get_file_by_name(group_id, original_filename):
                 current_app.logger.warning(
                     f"文件名 '{original_filename}' 已存在于组 '{group['name']}' 中，已跳过上传。"
                 )
                 continue
-            
+
             # 生成文件ID
             file_id = str(uuid.uuid4())
-            
-            # 获取文件扩展名
-            _, file_extension = os.path.splitext(original_filename)
-            if not file_extension:
-                # 如果没有扩展名，默认为.txt
-                file_extension = '.txt'
-            
-            # 使用ID作为文件名保存
-            storage_filename = f"{file_id}{file_extension}"
+
+            # 使用原始文件名作为存储文件名，处理文件名冲突
+            storage_filename = original_filename
             destination_path = os.path.join(group_dir, storage_filename)
+
+            # 处理文件名冲突：如果物理文件已存在，添加序号
+            counter = 1
+            base_name, extension = os.path.splitext(original_filename)
+            while os.path.exists(destination_path):
+                storage_filename = f"{base_name}_{counter}{extension}"
+                destination_path = os.path.join(group_dir, storage_filename)
+                counter += 1
             
             try:
                 file.save(destination_path)
                 file_size = os.path.getsize(destination_path)
                 
                 # 添加元数据，初始状态为 'processing'
+                # 现在storage_filename就是实际的文件路径
                 meta = pipeline.group_manager.add_file_meta(
                     group_id, original_filename, file_size, storage_filename, status="processing"
                 )
@@ -287,6 +293,60 @@ def get_file_details(group_id: str, file_id: str):
     if not file_meta:
         return jsonify({"error": "文件未找到。"}), 404
     return jsonify(file_meta)
+
+
+@api.route("/groups/<group_id>/files/<file_id>/download", methods=["GET"])
+def download_file(group_id: str, file_id: str):
+    """
+    下载指定的文件。
+    """
+    from flask import send_file
+
+    pipeline = get_rag_pipeline()
+
+    # 验证组是否存在
+    group = pipeline.group_manager.get_group_by_id(group_id)
+    if not group:
+        return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
+
+    # 获取文件元数据
+    file_meta = pipeline.group_manager.get_file_by_id(group_id, file_id)
+    if not file_meta:
+        return jsonify({"error": "文件未找到。"}), 404
+
+    # 获取组的物理路径
+    group_dir = pipeline.group_manager.get_group_physical_path(group_id)
+    if not group_dir:
+        return jsonify({"error": "无法获取组的物理路径。"}), 500
+
+    # 构建文件路径（使用存储的路径）
+    file_path = os.path.join(group_dir, file_meta.get('path', ''))
+
+    # 安全检查：确保文件路径在组目录内
+    try:
+        real_group_dir = os.path.realpath(group_dir)
+        real_file_path = os.path.realpath(file_path)
+        if not real_file_path.startswith(real_group_dir):
+            return jsonify({"error": "非法的文件路径。"}), 403
+    except Exception:
+        return jsonify({"error": "文件路径验证失败。"}), 500
+
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        return jsonify({"error": "文件不存在。"}), 404
+
+    try:
+        # 使用原始文件名作为下载文件名
+        download_name = file_meta.get('name', 'unknown_file')
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype='application/octet-stream'
+        )
+    except Exception as e:
+        current_app.logger.error(f"下载文件失败: {e}", exc_info=True)
+        return jsonify({"error": "下载文件时发生错误。"}), 500
 
 
 @api.route("/groups/<group_id>/webpages", methods=["POST"])
@@ -451,9 +511,15 @@ def create_conversation():
         if invalid_ids:
             return jsonify({"error": "提供的组 ID 无效", "invalid_ids": invalid_ids}), 400
 
+    # 验证提供的 agent_id 是否存在
+    if data.agent_id:
+        agent = pipeline.agent_manager.get_agent_by_id(data.agent_id)
+        if not agent:
+            return jsonify({"error": f"ID 为 '{data.agent_id}' 的Agent未找到。"}), 404
+
     conversation_id = str(uuid.uuid4())
     conversation = pipeline.conversation_manager.create_conversation(
-        conversation_id, data.group_ids
+        conversation_id, data.group_ids, data.agent_id
     )
     
     # 确保对话有默认标题
@@ -512,6 +578,7 @@ def post_message_to_conversation(conversation_id: str):
             query_text=data.message,
             chat_history=chat_history,
             group_ids=group_ids,
+            agent_id=conversation.get("agent_id"),
         )
     except Exception as e:
         current_app.logger.error(f"聊天处理期间出错: {e}", exc_info=True)
@@ -521,25 +588,36 @@ def post_message_to_conversation(conversation_id: str):
     pipeline.conversation_manager.add_message_to_conversation(
         conversation_id, "user", data.message
     )
-    pipeline.conversation_manager.add_message_to_conversation(
-        conversation_id, "assistant", str(response)
-    )
 
-    # 7. 返回响应
-    # 安全地处理 source_nodes，因为普通聊天可能没有这个属性
+    # 处理sources数据用于持久化
     source_nodes_data = []
     if hasattr(response, "source_nodes") and response.source_nodes:
         try:
             source_nodes_data = [
-                SourceNodeModel.from_source_node(n) for n in response.source_nodes
+                SourceNodeModel.from_source_node(n).model_dump() for n in response.source_nodes
             ]
         except Exception as e:
             current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
-            # 如果处理源节点出错，返回空列表而不是失败
+
+    # 保存助手消息和sources数据
+    pipeline.conversation_manager.add_message_to_conversation(
+        conversation_id, "assistant", str(response), sources=source_nodes_data
+    )
+
+    # 7. 返回响应
+    # 将已处理的sources数据转换为SourceNodeModel对象用于API响应
+    source_nodes_for_response = []
+    if source_nodes_data:
+        try:
+            source_nodes_for_response = [
+                SourceNodeModel.model_validate(node_data) for node_data in source_nodes_data
+            ]
+        except Exception as e:
+            current_app.logger.error(f"转换源节点数据时出错: {e}", exc_info=True)
 
     result = QueryResponse(
         answer=str(response),
-        sources=source_nodes_data,
+        sources=source_nodes_for_response,
     )
     return result.model_dump_json(), 200
 
@@ -624,28 +702,31 @@ def stream_message_to_conversation(conversation_id: str):
                 query_text=data.message,
                 chat_history=chat_history,
                 group_ids=group_ids,
+                agent_id=conversation.get("agent_id"),
             )
             
             # 保存用户消息到历史记录
             pipeline.conversation_manager.add_message_to_conversation(
                 conversation_id, "user", data.message
             )
-            
+
             # 模拟流式输出（实际实现应该从LLM获取流式输出）
             answer = str(response)
             source_nodes = []
+            source_nodes_data = []
             if hasattr(response, "source_nodes") and response.source_nodes:
                 try:
                     source_nodes = [
                         SourceNodeModel.from_source_node(n) for n in response.source_nodes
                     ]
+                    source_nodes_data = [node.model_dump() for node in source_nodes]
                 except Exception as e:
                     current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
                     # 如果处理源节点出错，使用空列表
-            
-            # 保存助手消息到历史记录
+
+            # 保存助手消息和sources数据到历史记录
             pipeline.conversation_manager.add_message_to_conversation(
-                conversation_id, "assistant", answer
+                conversation_id, "assistant", answer, sources=source_nodes_data
             )
             
             # 构建完整响应
@@ -711,6 +792,7 @@ def regenerate_message_stream(conversation_id: str):
                 query_text=user_message,
                 chat_history=chat_history,
                 group_ids=group_ids,
+                agent_id=conversation.get("agent_id"),
             )
             
             # 更新助手消息
@@ -720,20 +802,24 @@ def regenerate_message_stream(conversation_id: str):
             pipeline.conversation_manager.add_message_to_conversation(
                 conversation_id, "user", user_message
             )
-            pipeline.conversation_manager.add_message_to_conversation(
-                conversation_id, "assistant", str(response)
-            )
-            
-            # 构建响应
+
+            # 构建响应和sources数据
             source_nodes = []
+            source_nodes_data = []
             if hasattr(response, "source_nodes") and response.source_nodes:
                 try:
                     source_nodes = [
                         SourceNodeModel.from_source_node(n) for n in response.source_nodes
                     ]
+                    source_nodes_data = [node.model_dump() for node in source_nodes]
                 except Exception as e:
                     current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
                     # 如果处理源节点出错，使用空列表
+
+            # 保存助手消息和sources数据
+            pipeline.conversation_manager.add_message_to_conversation(
+                conversation_id, "assistant", str(response), sources=source_nodes_data
+            )
             
             # 构建完整响应
             full_response = QueryResponse(
@@ -807,3 +893,85 @@ def update_conversation_groups(conversation_id: str):
         json.dump(conversation, f, indent=4)
     
     return jsonify({"message": "对话关联知识库组已更新。"}), 200
+
+
+# --- Agent管理相关路由 ---
+
+@api.route("/agents", methods=["GET"])
+def list_agents():
+    """列出所有可用的Agent"""
+    pipeline = get_rag_pipeline()
+    agents = pipeline.agent_manager.list_agents()
+    return jsonify(agents), 200
+
+
+@api.route("/agents", methods=["POST"])
+def create_agent():
+    """创建一个新的Agent"""
+    try:
+        data = AgentCreateRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    pipeline = get_rag_pipeline()
+    agent = pipeline.agent_manager.create_agent(
+        name=data.name,
+        system_prompt=data.system_prompt,
+        description=data.description,
+        enable_MCP=data.enable_MCP,
+        tools=data.tools
+    )
+
+    if agent:
+        return jsonify(agent), 201
+    else:
+        return jsonify({"error": f"名为 '{data.name}' 的Agent已存在。"}), 409
+
+
+@api.route("/agents/<agent_id>", methods=["GET"])
+def get_agent(agent_id: str):
+    """获取指定Agent的详细信息"""
+    pipeline = get_rag_pipeline()
+    agent = pipeline.agent_manager.get_agent_by_id(agent_id)
+    if not agent:
+        return jsonify({"error": f"ID 为 '{agent_id}' 的Agent未找到。"}), 404
+    return jsonify(agent), 200
+
+
+@api.route("/agents/<agent_id>", methods=["PUT"])
+def update_agent(agent_id: str):
+    """更新指定Agent的信息"""
+    pipeline = get_rag_pipeline()
+
+    # 验证Agent是否存在
+    if not pipeline.agent_manager.get_agent_by_id(agent_id):
+        return jsonify({"error": f"ID 为 '{agent_id}' 的Agent未找到。"}), 404
+
+    # 验证请求数据
+    try:
+        data = AgentUpdateRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    # 更新Agent
+    agent = pipeline.agent_manager.update_agent(agent_id, data.model_dump(exclude_unset=True))
+    if agent:
+        return jsonify(agent), 200
+    else:
+        return jsonify({"error": "更新Agent失败。"}), 400
+
+
+@api.route("/agents/<agent_id>", methods=["DELETE"])
+def delete_agent(agent_id: str):
+    """删除指定的Agent"""
+    pipeline = get_rag_pipeline()
+
+    # 验证Agent是否存在
+    if not pipeline.agent_manager.get_agent_by_id(agent_id):
+        return jsonify({"error": f"ID 为 '{agent_id}' 的Agent未找到。"}), 404
+
+    # 删除Agent
+    if pipeline.agent_manager.delete_agent(agent_id):
+        return jsonify({"message": "Agent已成功删除。"}), 200
+    else:
+        return jsonify({"error": "删除Agent失败。"}), 400

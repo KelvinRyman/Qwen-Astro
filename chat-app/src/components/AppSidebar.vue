@@ -28,7 +28,7 @@
           <Icon name="knowledge" />
           <span class="link-text">知识库</span>
         </a>
-        <a href="#" class="sidebar-link">
+        <a href="#" class="sidebar-link" @click.prevent="router.push('/agents')">
           <Icon name="agent" />
           <span class="link-text">Agent</span>
         </a>

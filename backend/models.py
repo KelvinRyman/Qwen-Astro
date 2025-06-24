@@ -72,28 +72,68 @@ class SourceNodeModel(BaseModel):
     file_name: str
     page_label: str
     text_snippet: str
+    source_type: str  # 新增：来源类型 ('file' | 'webpage')
+    source_url: Optional[str] = None  # 新增：网页URL（仅网页类型）
 
     @classmethod
     def from_source_node(cls, source_node):
         # 获取节点对象，可能是不同类型的节点
         node = source_node.node
-        
+
         # 获取元数据，确保即使没有元数据也能正常工作
         metadata = getattr(node, 'metadata', {}) or {}
-        
+
         # 生成一个唯一ID，如果节点没有id属性，则使用hash值
         node_id = getattr(node, 'id', None)
         if node_id is None:
             # 使用节点内容的哈希作为ID
             node_id = f"text_node_{hash(node.get_text()[:100])}"
-        
+
         # 安全地获取文本内容
         try:
             text_snippet = node.get_text()[:250].strip() + "..."
         except (AttributeError, Exception) as e:
             text_snippet = "无法提取文本内容"
             logger.warning(f"提取节点文本时出错: {e}")
-        
+
+        # 确定来源类型和URL - 通过查询group_meta.json
+        source_type = "file"  # 默认为文件类型
+        source_url = None
+
+        # 尝试通过查询group_meta.json来确定类型
+        try:
+            import os
+            import json
+
+            # 获取group_meta.json的路径
+            group_meta_path = os.path.join("data", "group_meta.json")
+            if os.path.exists(group_meta_path):
+                with open(group_meta_path, "r", encoding="utf-8") as f:
+                    group_meta = json.load(f)
+
+                # 遍历所有组，查找匹配的ID
+                for group_id, group_data in group_meta.items():
+                    # 检查是否在webpages中
+                    for webpage in group_data.get("webpages", []):
+                        if webpage.get("id") == node_id:
+                            source_type = "webpage"
+                            source_url = webpage.get("url")
+                            break
+
+                    # 如果已经找到，跳出外层循环
+                    if source_type == "webpage":
+                        break
+
+                    # 检查是否在files中（保持默认的file类型）
+                    for file_item in group_data.get("files", []):
+                        if file_item.get("id") == node_id:
+                            source_type = "file"
+                            break
+        except Exception as e:
+            # 如果查询失败，回退到原来的逻辑
+            source_url = metadata.get("url")
+            source_type = "webpage" if source_url else "file"
+
         return cls(
             id=node_id,
             score=source_node.score,
@@ -101,6 +141,8 @@ class SourceNodeModel(BaseModel):
             file_name=metadata.get("file_name", "N/A"),
             page_label=metadata.get("page_label", "N/A"),
             text_snippet=text_snippet,
+            source_type=source_type,
+            source_url=source_url,
         )
 
 
@@ -150,6 +192,7 @@ class GroupResponse(BaseModel):
 class ConversationCreationRequest(BaseModel):
     """创建会话的请求模型"""
     group_ids: Optional[List[str]] = Field(None, description="要关联的知识库组ID列表")
+    agent_id: Optional[str] = Field(None, description="要使用的Agent ID")
 
 
 class MessagePostRequest(BaseModel):
@@ -166,6 +209,35 @@ class ConversationRenameRequest(BaseModel):
 class ConversationGroupsUpdateRequest(BaseModel):
     """更新会话关联的知识库组的请求模型"""
     group_ids: List[str] = Field(..., description="要关联的知识库组ID列表")
+
+
+class AgentCreateRequest(BaseModel):
+    """创建Agent的请求模型"""
+    name: str = Field(..., min_length=1, description="Agent的名称")
+    system_prompt: str = Field(..., min_length=1, description="Agent的系统提示词")
+    description: Optional[str] = Field("", description="Agent的描述")
+    enable_MCP: Optional[bool] = Field(False, description="是否启用MCP")
+    tools: Optional[str] = Field("", description="Agent的工具配置")
+
+
+class AgentUpdateRequest(BaseModel):
+    """更新Agent的请求模型"""
+    name: Optional[str] = Field(None, min_length=1, description="Agent的名称")
+    system_prompt: Optional[str] = Field(None, min_length=1, description="Agent的系统提示词")
+    description: Optional[str] = Field(None, description="Agent的描述")
+    enable_MCP: Optional[bool] = Field(None, description="是否启用MCP")
+    tools: Optional[str] = Field(None, description="Agent的工具配置")
+
+
+class AgentResponse(BaseModel):
+    """Agent响应模型"""
+    id: str
+    name: str
+    system_prompt: str
+    description: str
+    enable_MCP: bool
+    tools: str
+    created_at: str
 
 
 class MessagesDeleteRequest(BaseModel):

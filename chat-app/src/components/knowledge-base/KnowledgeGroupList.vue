@@ -81,7 +81,7 @@ const handleDelete = (groupId: string) => {
 }
 .group-list-container {
   width: 240px;
-  background-color: var(--bg-mid);
+  background-color: var(--bg-secondary);
   padding: 16px;
   display: flex;
   flex-direction: column;

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import ChatView from '@/views/ChatView.vue'
 import KnowledgeBaseView from '@/views/KnowledgeBaseView.vue'
+import AgentView from '@/views/AgentView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -23,6 +24,11 @@ const router = createRouter({
       path: '/knowledge',
       name: 'KnowledgeBase',
       component: KnowledgeBaseView,
+    },
+    {
+      path: '/agents',
+      name: 'Agents',
+      component: AgentView,
     },
     {
       path: '/about',

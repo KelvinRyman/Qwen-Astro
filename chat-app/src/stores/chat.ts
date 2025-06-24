@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import type { Ref } from 'vue';
-import { chatApi, type ConversationSummary, type Conversation, type QueryResponse } from '@/api/chatApi';
+import { chatApi, type ConversationSummary, type Conversation, type QueryResponse, type SourceNode } from '@/api/chatApi';
 
 export interface ChatItem {
   id: string;
@@ -18,6 +18,7 @@ export interface ChatMessage {
   content: string;
   isGenerating?: boolean; // 标记消息是否正在生成中
   group_ids?: string[]; // 用户消息关联的知识库组ID
+  sources?: SourceNode[]; // 助手消息的引用来源
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -68,17 +69,18 @@ export const useChatStore = defineStore('chat', () => {
       title: '新对话',
       created_at: new Date().toISOString(),
       group_ids: null,
+      agent_id: null,
       messages: []
     };
   }
 
   // 创建新对话（仅在发送第一条消息时调用）
-  async function createConversation(groupIds?: string[]) {
+  async function createConversation(groupIds?: string[], agentId?: string) {
     isLoading.value = true;
     error.value = null;
-    
+
     try {
-      const newConversation = await chatApi.createConversation(groupIds);
+      const newConversation = await chatApi.createConversation(groupIds, agentId);
       
       // 更新对话列表
       const timeGroup = chatApi.formatRelativeTime(newConversation.created_at);
@@ -112,13 +114,13 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // 发送消息
-  async function sendMessage(message: string, groupIds?: string[]): Promise<QueryResponse | null> {
+  async function sendMessage(message: string, groupIds?: string[], agentId?: string): Promise<QueryResponse | null> {
     error.value = null;
-    
+
     try {
       // 如果是新对话模式，先创建对话
       if (isNewChatMode.value) {
-        const conversationId = await createConversation(groupIds);
+        const conversationId = await createConversation(groupIds, agentId);
         if (!conversationId) return null;
       }
       
@@ -163,9 +165,10 @@ export const useChatStore = defineStore('chat', () => {
             if (currentConversation.value && currentConversation.value.messages[assistantMessageIndex]) {
               // 更新最终消息内容并移除生成中标记
               currentConversation.value.messages[assistantMessageIndex].content = response.answer;
+              currentConversation.value.messages[assistantMessageIndex].sources = response.sources;
               currentConversation.value.messages[assistantMessageIndex].isGenerating = false;
               isGeneratingMessage.value = false;
-              
+
               // 如果是第一条消息，更新对话标题
               if (currentConversation.value.messages.length === 2) {
                 // 使用用户消息的前20个字符作为标题
@@ -189,6 +192,7 @@ export const useChatStore = defineStore('chat', () => {
         // 更新助手消息
         if (currentConversation.value && currentConversation.value.messages[assistantMessageIndex]) {
           currentConversation.value.messages[assistantMessageIndex].content = response.answer;
+          currentConversation.value.messages[assistantMessageIndex].sources = response.sources;
           currentConversation.value.messages[assistantMessageIndex].isGenerating = false;
           isGeneratingMessage.value = false;
         }
@@ -301,6 +305,7 @@ export const useChatStore = defineStore('chat', () => {
           if (currentConversation.value && currentConversation.value.messages[assistantMessageIndex]) {
             // 更新最终消息内容并移除生成中标记
             currentConversation.value.messages[assistantMessageIndex].content = response.answer;
+            currentConversation.value.messages[assistantMessageIndex].sources = response.sources;
             currentConversation.value.messages[assistantMessageIndex].isGenerating = false;
             isGeneratingMessage.value = false;
           }

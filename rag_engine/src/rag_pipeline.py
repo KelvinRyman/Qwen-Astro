@@ -16,6 +16,7 @@ from .components import create_vector_store, setup_global_settings
 from .group_manager import GroupManager
 from .data_processor import DataProcessor
 from .conversation_manager import ConversationManager
+from .agent_manager import AgentManager
 
 
 class RAGPipeline:
@@ -33,6 +34,7 @@ class RAGPipeline:
         self.group_manager = GroupManager(config)
         self.data_processor = DataProcessor(config)
         self.conversation_manager = ConversationManager()
+        self.agent_manager = AgentManager(config)
 
     def initialize(self):
         """
@@ -325,7 +327,7 @@ class RAGPipeline:
         return all_success
 
     def chat(
-        self, query_text: str, chat_history: List[Dict[str, str]], group_ids: Optional[List[str]] = None
+        self, query_text: str, chat_history: List[Dict[str, str]], group_ids: Optional[List[str]] = None, agent_id: Optional[str] = None
     ):
         """
         进行聊天，可选地在指定组内进行 RAG 检索。
@@ -334,18 +336,22 @@ class RAGPipeline:
             query_text: 用户提出的新问题。
             chat_history: 一个包含过去消息的列表，格式为 [{'role': 'user'/'assistant', 'content': '...'}, ...]
             group_ids: 如果提供了则执行 RAG，否则执行无状态聊天
+            agent_id: 如果提供了则使用Agent的system prompt
 
         Returns:
             一个包含答案和源节点的响应对象。
         """
-        # 1. 创建并填充聊天内存 (这部分是共用的)
+        # 1. 确定要使用的system prompt
+        system_prompt = self._get_system_prompt(agent_id, group_ids)
+
+        # 2. 创建并填充聊天内存 (这部分是共用的)
         llama_chat_history = [
             ChatMessage(role=msg["role"], content=msg["content"])
             for msg in chat_history
         ]
         memory = ChatMemoryBuffer.from_defaults(chat_history=llama_chat_history)
 
-        # 2. 根据是否提供 group_ids 决定聊天引擎类型
+        # 3. 根据是否提供 group_ids 决定聊天引擎类型
         if group_ids:
             # --- RAG 聊天模式 ---
             logging.info(f"在组 {group_ids} 中进行 RAG 聊天: '{query_text}'")
@@ -362,7 +368,7 @@ class RAGPipeline:
                     "filters": filters,
                     "similarity_top_k": self.config.SIMILARITY_TOP_K,
                 },
-                system_prompt=self.config.SYSTEM_PROMPT,
+                system_prompt=system_prompt,
             )
         else:
             # --- 标准聊天模式 (无 RAG) ---
@@ -370,9 +376,101 @@ class RAGPipeline:
             chat_engine = self.index.as_chat_engine(
                 chat_mode="openai",  # "openai" 模式适合上下文聊天，不会进行检索
                 memory=memory,
-                system_prompt=self.config.SYSTEM_PROMPT,
+                system_prompt=system_prompt,
             )
 
-        # 3. 执行聊天
+        # 4. 执行聊天
         response = chat_engine.chat(query_text)
         return response
+
+    def _get_system_prompt(self, agent_id: Optional[str], group_ids: Optional[List[str]]) -> str:
+        """
+        根据Agent ID和知识库组ID确定要使用的system prompt。
+
+        Args:
+            agent_id: Agent ID
+            group_ids: 知识库组ID列表
+
+        Returns:
+            要使用的system prompt字符串
+        """
+        # 如果有Agent，优先使用Agent的system prompt
+        if agent_id:
+            agent = self.agent_manager.get_agent_by_id(agent_id)
+            if agent:
+                return agent["system_prompt"]
+
+        # 如果有知识库组，使用RAG的system prompt
+        if group_ids:
+            return self._get_rag_system_prompt(group_ids)
+
+        # 否则使用默认的system prompt
+        return self.config.SYSTEM_PROMPT
+
+    def _get_rag_system_prompt(self, group_ids: List[str]) -> str:
+        """
+        为RAG生成专用的system prompt，包含知识库信息。
+
+        Args:
+            group_ids: 知识库组ID列表
+
+        Returns:
+            RAG专用的system prompt
+        """
+        # 收集知识库中的文档和网页信息
+        documents = []
+        webpages = []
+
+        for group_id in group_ids:
+            group = self.group_manager.get_group_by_id(group_id)
+            if group:
+                # 收集文档名称
+                for file_meta in group.get("files", []):
+                    if file_meta.get("status") == "completed":
+                        documents.append(file_meta.get("name", "未知文档"))
+
+                # 收集网页URL
+                for webpage_meta in group.get("webpages", []):
+                    if webpage_meta.get("status") == "completed":
+                        webpages.append(webpage_meta.get("url", "未知网页"))
+
+        # 构建RAG system prompt
+        rag_prompt = "[知识库中的文档]: \n"
+        if documents:
+            rag_prompt += "\n".join(f"- {doc}" for doc in documents)
+        else:
+            rag_prompt += "无"
+
+        rag_prompt += "\n---\n\n[知识库中的网页]:\n"
+        if webpages:
+            rag_prompt += "\n".join(f"- {url}" for url in webpages)
+        else:
+            rag_prompt += "无"
+
+        rag_prompt += """
+---
+
+[指令]:
+
+**角色与核心任务 / Role & Core Task:**
+你是一个名为"文档分析助理"的严谨AI。你的唯一任务是严格、忠实地根据上方 `[文档]` 部分提供的文本内容来回答用户的问题。
+
+**行为准则 / Rules of Conduct:**
+
+1.  **严守信息边界 (Strict Information Boundary):** 绝对禁止使用 `[文档]` 之外的任何背景知识、个人经验或互联网信息。你的知识被严格限定在所提供的文本内。
+
+2.  **答案必须基于原文 (Answers Must Be Grounded in the Source):** 你的回答必须完全基于 `[文档]` 中的事实和陈述。为确保准确性，在回答时应尽可能引用原文的关键短语或句子来支持你的论点。
+
+3.  **处理信息不存在的情况 (Handling Non-Existent Information):** 如果 `[文档]` 中完全没有包含回答问题所需的信息，你必须且只能回复一个标准答案："根据提供的文档，无法回答此问题。" 不要尝试猜测、编造或提供任何形式的推断性回答。
+
+4.  **处理信息不完整的情况 (Handling Incomplete Information):** 如果 `[文档]` 包含部分相关信息但不足以形成一个完整的答案，你应该首先清晰地陈述文档中已有的事实，然后明确指出"关于...的更多细节，文档中未提供。"
+
+5.  **保持客观中立 (Maintain Objectivity and Neutrality):** 以客观、中立、专业的语气回答问题，避免任何个人观点、主观评价或情感色彩。
+
+6.  **遵循提问语言 (Follow the Question's Language):** 除非特别指示，否则请使用与用户提问相同的语言（例如，中文问题用中文回答）进行回答。
+
+---
+现在，请严格遵循以上所有指令，对用户的下一个提问进行回答。
+"""
+
+        return rag_prompt
