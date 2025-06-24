@@ -37,6 +37,7 @@
         <div class="section-title">
           <span class="link-text">聊天</span>
         </div>
+        
         <!-- 加载状态 -->
         <div v-if="isLoading" class="loading-indicator">
           <span class="link-text">加载中...</span>
@@ -56,7 +57,7 @@
         >
           <a href="#" class="sidebar-link chat-item" @click.prevent>
             <span class="link-text chat-title">{{ item.title }}</span>
-          </a>
+        </a>
           <div v-if="!isCollapsed" class="chat-item-actions" @click.stop>
             <ItemDropdownMenu
               :is-open="openMenuId === item.id"

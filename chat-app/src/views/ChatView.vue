@@ -11,8 +11,21 @@
       <div v-else-if="currentConversation">
         <div v-for="(message, index) in currentConversation.messages" :key="index" class="message-wrapper">
           <!-- 用户消息 -->
-          <div v-if="message.role === 'user'" class="user-message">
-            {{ message.content }}
+          <div v-if="message.role === 'user'" class="user-message-wrapper">
+            <div class="user-message">
+              {{ message.content }}
+            </div>
+            <!-- 用户消息操作按钮 -->
+            <div class="message-actions user-message-actions">
+              <button class="message-action-button" title="复制" @click="copyToClipboard(message.content)">
+                <Icon name="copy" />
+                <span class="tooltip">复制</span>
+              </button>
+              <button class="message-action-button" title="重新生成">
+                <Icon name="refresh" />
+                <span class="tooltip">重新生成</span>
+              </button>
+            </div>
           </div>
           
           <!-- 助手消息 -->
@@ -23,11 +36,13 @@
             </div>
             <!-- 只在消息生成完毕后显示操作按钮 -->
             <div v-if="!message.isGenerating" class="message-actions">
-              <button class="message-action-button">
+              <button class="message-action-button" title="复制" @click="copyToClipboard(message.content)">
                 <Icon name="copy" />
+                <span class="tooltip">复制</span>
               </button>
-              <button class="message-action-button">
+              <button class="message-action-button" title="重新生成" @click="regenerateMessage(index)">
                 <Icon name="refresh" />
+                <span class="tooltip">重新生成</span>
               </button>
             </div>
           </div>
@@ -67,6 +82,15 @@
                 </button>
               </div>
             </div>
+            <div ref="knowledgeMenuContainerRef" class="knowledge-button-wrapper">
+              <button
+                class="input-icon-button"
+                :class="{ 'knowledge-selected': hasSelectedKnowledgeBase }"
+                @click="toggleKnowledgeBaseModal"
+              >
+                <Icon name="knowledge" />
+              </button>
+            </div>
           </div>
           <div class="actions-right">
             <button class="input-icon-button">
@@ -84,14 +108,24 @@
         </div>
       </div>
     </div>
+    
+    <!-- 知识库选择弹窗 -->
+    <KnowledgeBaseSelectModal 
+      v-if="isKnowledgeBaseModalOpen"
+      :conversation-id="currentConversationId"
+      :selected-group-ids="currentConversation?.group_ids || []"
+      @close="isKnowledgeBaseModalOpen = false"
+      @update="handleKnowledgeBaseUpdate"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import Icon from '../components/AppIcon.vue'
+import Icon from '@/components/AppIcon.vue'
 import { useChatStore } from '@/stores/chat'
+import KnowledgeBaseSelectModal from '@/components/KnowledgeBaseSelectModal.vue'
 
 const welcomeMessages = [
   '一小步和一大步。',
@@ -111,6 +145,8 @@ const messagesContainerRef = ref<HTMLElement | null>(null)
 
 const isToolMenuOpen = ref(false)
 const toolMenuContainerRef = ref<HTMLElement | null>(null)
+const knowledgeMenuContainerRef = ref<HTMLElement | null>(null)
+const isKnowledgeBaseModalOpen = ref(false)
 
 // 获取路由和聊天存储
 const route = useRoute()
@@ -124,6 +160,37 @@ const currentConversation = computed(() => chatStore.currentConversation)
 const hasMessages = computed(() => 
   currentConversation.value && currentConversation.value.messages.length > 0
 )
+const currentConversationId = computed(() =>
+  currentConversation.value ? currentConversation.value.id : ''
+)
+
+// 计算是否选择了知识库
+const hasSelectedKnowledgeBase = computed(() => {
+  const groupIds = getKnowledgeBaseGroupIds()
+  return groupIds.length > 0
+})
+
+// 复制文本到剪贴板
+const copyToClipboard = async (text: string) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    // 可以添加一个临时提示，表示复制成功
+    console.log('文本已复制到剪贴板');
+  } catch (err) {
+    console.error('复制失败:', err);
+  }
+}
+
+// 重新生成消息
+const regenerateMessage = async (messageIndex: number) => {
+  if (!currentConversation.value) return;
+  
+  // 直接调用store中的重新生成方法，只传递助手消息的索引
+  await chatStore.regenerateResponse(messageIndex);
+  
+  // 滚动到底部
+  scrollToBottom();
+}
 
 // 监听消息变化，自动滚动到底部
 watch(() => currentConversation.value?.messages, () => {
@@ -182,20 +249,62 @@ const handleEnterKey = (event: KeyboardEvent) => {
 const sendMessage = async () => {
   const message = chatInputText.value.trim()
   if (!message || isGenerating.value) return
-  
+
   // 立即清空输入框
   chatInputText.value = ''
-  
+
   // 重置输入框高度
   if (textareaRef.value) {
     textareaRef.value.style.height = 'auto'
   }
-  
+
   // 发送消息
-  await chatStore.sendMessage(message)
-  
+  // 获取要使用的知识库组ID
+  const groupIdsToUse = getKnowledgeBaseGroupIds()
+  await chatStore.sendMessage(message, groupIdsToUse)
+
   // 滚动到底部
   scrollToBottom()
+}
+
+// 获取要使用的知识库组ID（实现继承逻辑）
+const getKnowledgeBaseGroupIds = (): string[] => {
+  // 如果当前对话已经有关联的知识库组，直接使用
+  if (currentConversation.value?.group_ids && currentConversation.value.group_ids.length > 0) {
+    return currentConversation.value.group_ids
+  }
+
+  // 如果当前对话没有关联知识库，但有消息历史，尝试从最后一个用户消息继承
+  if (currentConversation.value?.messages && currentConversation.value.messages.length > 0) {
+    // 从后往前查找最后一个用户消息，看是否有关联的知识库
+    for (let i = currentConversation.value.messages.length - 1; i >= 0; i--) {
+      const message = currentConversation.value.messages[i]
+      if (message.role === 'user' && message.group_ids && message.group_ids.length > 0) {
+        return message.group_ids
+      }
+    }
+  }
+
+  // 如果都没有，返回空数组
+  return []
+}
+
+// 切换知识库选择弹窗
+const toggleKnowledgeBaseModal = () => {
+  isKnowledgeBaseModalOpen.value = !isKnowledgeBaseModalOpen.value
+}
+
+// 处理知识库更新
+const handleKnowledgeBaseUpdate = (selectedGroupIds: string[]) => {
+  if (currentConversation.value) {
+    // 如果是已存在的对话，更新对话关联的知识库组
+    if (currentConversation.value.id) {
+      chatStore.updateConversationGroups(currentConversation.value.id, selectedGroupIds)
+    } else {
+      // 如果是新对话模式，直接更新本地状态
+      currentConversation.value.group_ids = selectedGroupIds
+    }
+  }
 }
 
 // 组件挂载时
@@ -273,6 +382,13 @@ onUnmounted(() => {
   width: 100%;
 }
 
+/* 用户消息容器 */
+.user-message-wrapper {
+  align-self: flex-end;
+  max-width: 80%;
+  position: relative;
+}
+
 /* 用户消息样式 */
 .user-message {
   align-self: flex-end;
@@ -280,7 +396,6 @@ onUnmounted(() => {
   color: var(--text-primary);
   padding: 14px;
   border-radius: var(--border-radius-large);
-  max-width: 80%;
   word-break: break-word;
   line-height: 1.5;
   font-size: 16px;
@@ -289,7 +404,7 @@ onUnmounted(() => {
 /* 助手消息容器 */
 .assistant-message-wrapper {
   align-self: flex-start;
-  max-width: 80%;
+  max-width: 100%;
   position: relative;
 }
 
@@ -320,14 +435,21 @@ onUnmounted(() => {
 /* 消息操作按钮 */
 .message-actions {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 4px;
+  margin-top: 10px;
   opacity: 0;
   transition: opacity 0.2s ease;
 }
 
-.assistant-message-wrapper:hover .message-actions {
+/* 用户消息操作按钮仍然需要hover才显示 */
+.user-message-wrapper:hover .message-actions {
   opacity: 1;
+}
+
+/* 助手消息操作按钮常驻显示 */
+.assistant-message-wrapper .message-actions {
+  opacity: 1;
+  margin-left: -10px; /* 向左移动 */
 }
 
 .message-action-button {
@@ -336,13 +458,14 @@ onUnmounted(() => {
   color: var(--text-secondary);
   cursor: pointer;
   padding: 6px;
-  border-radius: 50%;
+  border-radius: 8px;
   width: 32px;
   height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: background-color 0.2s, color 0.2s;
+  position: relative; /* 为tooltip定位 */
 }
 
 .message-action-button:hover {
@@ -350,8 +473,36 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 
+.message-action-button .tooltip {
+  position: absolute;
+  bottom: -30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #000;
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+  z-index: 10;
+}
+
+.message-action-button:hover .tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
 .message-action-button :deep(svg) {
   font-size: 18px;
+  font-weight: 1000; /* 加粗图标 */
+}
+
+/* 用户消息操作按钮特殊样式 */
+.user-message-actions {
+  justify-content: flex-end;
 }
 
 .input-container {
@@ -454,7 +605,8 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-.tool-button-wrapper {
+.tool-button-wrapper,
+.knowledge-button-wrapper {
   position: relative;
 }
 
@@ -495,5 +647,15 @@ onUnmounted(() => {
 
 .tool-menu-item :deep(svg) {
   font-size: 20px;
+}
+
+/* 知识库按钮选中状态样式 */
+.input-icon-button.knowledge-selected {
+  background-color: #1e40af; /* 蓝色背景 */
+  color: #ffffff; /* 白色图标 */
+}
+
+.input-icon-button.knowledge-selected:hover {
+  background-color: #1d4ed8; /* 悬停时稍微深一点的蓝色 */
 }
 </style>

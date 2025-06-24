@@ -27,6 +27,7 @@ export interface Message {
   content: string;
   timestamp?: string;
   isGenerating?: boolean;
+  group_ids?: string[]; // 用户消息关联的知识库组ID
 }
 
 export interface ConversationSummary {
@@ -62,9 +63,10 @@ export const chatApi = {
   },
 
   // 发送消息到对话
-  async sendMessage(conversationId: string, message: string): Promise<QueryResponse> {
+  async sendMessage(conversationId: string, message: string, groupIds?: string[]): Promise<QueryResponse> {
     const response = await apiClient.post(`/conversations/${conversationId}/messages`, {
-      message
+      message,
+      group_ids: groupIds
     });
     return response.data;
   },
@@ -72,6 +74,27 @@ export const chatApi = {
   // 删除对话
   async deleteConversation(conversationId: string): Promise<void> {
     await apiClient.delete(`/conversations/${conversationId}`);
+  },
+
+  // 删除消息
+  async deleteMessages(conversationId: string, fromIndex: number): Promise<void> {
+    await apiClient.delete(`/conversations/${conversationId}/messages`, {
+      data: { from_index: fromIndex }
+    });
+  },
+
+  // 重命名对话
+  async renameConversation(conversationId: string, newTitle: string): Promise<void> {
+    await apiClient.post(`/conversations/${conversationId}/rename`, {
+      title: newTitle
+    });
+  },
+
+  // 更新对话关联的知识库组
+  async updateConversationGroups(conversationId: string, groupIds: string[]): Promise<void> {
+    await apiClient.post(`/conversations/${conversationId}/groups`, {
+      group_ids: groupIds
+    });
   },
 
   // 搜索对话
@@ -137,8 +160,13 @@ export const chatApi = {
   },
 
   // 发送消息到对话（流式响应）
-  async sendMessageStreamed(conversationId: string, message: string, 
-    onChunk: (chunk: string) => void, onComplete: (response: QueryResponse) => void): Promise<void> {
+  async sendMessageStreamed(
+    conversationId: string, 
+    message: string, 
+    onChunk: (chunk: string) => void, 
+    onComplete: (response: QueryResponse) => void,
+    groupIds?: string[]
+  ): Promise<void> {
     try {
       // 创建请求
       const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/messages/stream`, {
@@ -146,7 +174,10 @@ export const chatApi = {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message })
+        body: JSON.stringify({ 
+          message,
+          group_ids: groupIds
+        })
       });
 
       // 创建读取器
@@ -176,6 +207,49 @@ export const chatApi = {
       onComplete(jsonResponse);
     } catch (error) {
       console.error('流式发送消息失败:', error);
+      throw error;
+    }
+  },
+
+  // 重新生成消息（流式响应）
+  async regenerateMessageStreamed(
+    conversationId: string, 
+    fromMessageIndex: number,
+    onChunk: (chunk: string) => void, 
+    onComplete: (response: QueryResponse) => void
+  ): Promise<void> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/regenerate/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from_message_index: fromMessageIndex })
+      });
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('无法创建响应流读取器');
+      }
+
+      let fullResponse = '';
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, { stream: true });
+        fullResponse += chunk;
+        onChunk(chunk); // 直接传递原始块
+      }
+      
+      // 流结束后，fullResponse包含完整的JSON对象
+      const jsonResponse = JSON.parse(fullResponse);
+      onComplete(jsonResponse);
+
+    } catch (error) {
+      console.error('流式重新生成消息失败:', error);
       throw error;
     }
   },

@@ -10,7 +10,7 @@
           @input="handleSearch"
           ref="searchInput"
         />
-        <button class="close-button" @click="$emit('close')">
+        <button class="close-button" @click="$emit('close'), clearSearch">
           <Icon name="close" />
         </button>
       </div>
@@ -61,6 +61,7 @@ import Icon from './AppIcon.vue';
 import { useChatStore } from '@/stores/chat';
 import { ref, computed, onMounted, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
+import { chatApi, type ConversationSummary } from '@/api/chatApi';
 
 const emit = defineEmits(['close']);
 
@@ -68,8 +69,17 @@ const router = useRouter();
 const chatStore = useChatStore();
 const searchQuery = ref('');
 const searchInput = ref<HTMLInputElement | null>(null);
-const isLoading = computed(() => chatStore.isLoading);
-const chatHistory = computed(() => chatStore.chatHistory);
+const isLoading = ref(false);
+const searchResults = ref<ConversationSummary[]>([]);
+const searchResultGroups = ref<{ title: string; items: ConversationSummary[] }[]>([]);
+
+// 计算属性 - 根据当前状态决定显示搜索结果还是全部会话
+const chatHistory = computed(() => {
+  if (searchQuery.value.trim() && searchResultGroups.value.length > 0) {
+    return searchResultGroups.value;
+  }
+  return chatStore.chatHistory;
+});
 
 // 在组件挂载时加载对话列表并聚焦搜索框
 onMounted(async () => {
@@ -89,14 +99,31 @@ const handleSearch = () => {
   if (searchTimeout) {
     clearTimeout(searchTimeout);
   }
+  
   searchTimeout = setTimeout(async () => {
-    await chatStore.searchConversations(searchQuery.value);
+    if (searchQuery.value.trim()) {
+      isLoading.value = true;
+      try {
+        // 直接调用API而不是通过chatStore
+        searchResults.value = await chatApi.searchConversations(searchQuery.value);
+        searchResultGroups.value = chatApi.groupConversationsByDate(searchResults.value);
+      } catch (err) {
+        console.error('搜索对话失败:', err);
+      } finally {
+        isLoading.value = false;
+      }
+    } else {
+      // 清空搜索结果，显示全部会话
+      searchResults.value = [];
+      searchResultGroups.value = [];
+    }
   }, 300) as unknown as number;
 };
 
 // 选择聊天
 const selectChat = (chatId: string) => {
   router.push(`/chat/${chatId}`);
+  resetSearch();
   emit('close');
 };
 
@@ -104,7 +131,20 @@ const selectChat = (chatId: string) => {
 const createNewChat = async () => {
   chatStore.prepareNewChat();
   router.push('/chat');
+  resetSearch();
   emit('close');
+};
+
+// 重置搜索状态
+const resetSearch = () => {
+  searchQuery.value = '';
+  searchResults.value = [];
+  searchResultGroups.value = [];
+};
+
+// 添加清除搜索按钮
+const clearSearch = () => {
+  resetSearch();
 };
 </script>
 

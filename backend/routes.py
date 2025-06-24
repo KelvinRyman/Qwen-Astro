@@ -4,10 +4,10 @@ import threading
 from flask import Blueprint, request, jsonify, current_app, Response
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import HTTPException
-from pydantic import ValidationError
+from pydantic import ValidationError, Field
 
 from .models import (
-    ChatMessageRequest,
+    LegacyChatMessageRequest,
     GroupCreateRequest,
     QueryRequest,
     QueryResponse,
@@ -20,6 +20,10 @@ from .models import (
     WebpagesAddRequest,
     ConversationCreationRequest,
     MessagePostRequest,
+    ConversationRenameRequest,
+    MessagesDeleteRequest,
+    MessageRegenerateRequest,
+    ConversationGroupsUpdateRequest,
 )
 from rag_engine import RAGPipeline
 
@@ -343,7 +347,6 @@ def delete_files_from_group(group_id: str):
     pipeline = get_rag_pipeline()
     if not pipeline.group_manager.get_group_by_id(group_id):
         return jsonify({"error": f"ID 为 '{group_id}' 的组未找到。"}), 404
-
     try:
         data = FilesDeleteRequest.model_validate(request.json)
     except ValidationError as e:
@@ -411,9 +414,15 @@ def query_rag():
         response = pipeline.query_in_groups(data.query, data.group_ids)
 
         # 将 LlamaIndex 的响应对象转换为可序列化的 JSON
-        source_nodes = [
-            SourceNodeModel.from_source_node(n) for n in response.source_nodes
-        ]
+        source_nodes = []
+        try:
+            source_nodes = [
+                SourceNodeModel.from_source_node(n) for n in response.source_nodes
+            ]
+        except Exception as e:
+            current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
+            # 如果处理源节点出错，使用空列表
+            
         result = QueryResponse(
             answer=str(response),
             sources=source_nodes,
@@ -446,6 +455,12 @@ def create_conversation():
     conversation = pipeline.conversation_manager.create_conversation(
         conversation_id, data.group_ids
     )
+    
+    # 确保对话有默认标题
+    if "title" not in conversation:
+        conversation["title"] = "新对话"
+        pipeline.conversation_manager.rename_conversation(conversation_id, "新对话")
+    
     return jsonify(conversation), 201
 
 
@@ -486,9 +501,12 @@ def post_message_to_conversation(conversation_id: str):
     # 3. 准备聊天历史和上下文
     # LlamaIndex 需要的格式是 {'role': 'user'/'assistant', 'content': '...'}
     chat_history = conversation.get("messages", [])
-    group_ids = conversation.get("group_ids", [])
-
-    # 4. 调用 RAG 引擎
+    
+    # 4. 确定使用哪些知识库组
+    # 如果请求中指定了知识库组，使用请求中的；否则使用会话中保存的
+    group_ids = data.group_ids if data.group_ids is not None else conversation.get("group_ids", [])
+    
+    # 5. 调用 RAG 引擎
     try:
         response = pipeline.chat(
             query_text=data.message,
@@ -499,21 +517,25 @@ def post_message_to_conversation(conversation_id: str):
         current_app.logger.error(f"聊天处理期间出错: {e}", exc_info=True)
         return jsonify({"error": "处理聊天时发生内部错误。"}), 500
 
-    # 5. 保存新的消息到历史记录
+    # 6. 保存新的消息到历史记录
     pipeline.conversation_manager.add_message_to_conversation(
         conversation_id, "user", data.message
     )
     pipeline.conversation_manager.add_message_to_conversation(
         conversation_id, "assistant", str(response)
     )
-    
-    # 6. 返回响应
+
+    # 7. 返回响应
     # 安全地处理 source_nodes，因为普通聊天可能没有这个属性
     source_nodes_data = []
     if hasattr(response, "source_nodes") and response.source_nodes:
-        source_nodes_data = [
-            SourceNodeModel.from_source_node(n) for n in response.source_nodes
-        ]
+        try:
+            source_nodes_data = [
+                SourceNodeModel.from_source_node(n) for n in response.source_nodes
+            ]
+        except Exception as e:
+            current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
+            # 如果处理源节点出错，返回空列表而不是失败
 
     result = QueryResponse(
         answer=str(response),
@@ -532,15 +554,41 @@ def delete_conversation(conversation_id: str):
         return jsonify({"error": "对话未找到。"}), 404
 
 
+@api.route("/conversations/<conversation_id>/rename", methods=["POST"])
+def rename_conversation(conversation_id: str):
+    """重命名一个对话。"""
+    pipeline = get_rag_pipeline()
+    
+    # 验证对话是否存在
+    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+    
+    # 验证请求数据
+    try:
+        data = ConversationRenameRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+    
+    # 重命名对话
+    if pipeline.conversation_manager.rename_conversation(conversation_id, data.title):
+        return jsonify({"message": "对话已成功重命名。"}), 200
+    else:
+        return jsonify({"error": "重命名对话失败。"}), 500
+
+
 @api.route("/conversations/search", methods=["GET"])
 def search_conversations():
     """根据查询字符串搜索对话。"""
-    query = request.args.get("q")
-    if not query:
-        return jsonify({"error": "必须提供查询参数 'q'。"}), 400
+    query = request.args.get("q", "")
 
     pipeline = get_rag_pipeline()
-    results = pipeline.conversation_manager.search_conversations(query)
+    if not query.strip():
+        # 如果查询为空，返回所有对话
+        results = pipeline.conversation_manager.list_conversations()
+    else:   # 否则执行搜索
+        results = pipeline.conversation_manager.search_conversations(query)
+    
     return jsonify(results), 200
 
 
@@ -562,9 +610,12 @@ def stream_message_to_conversation(conversation_id: str):
 
     # 3. 准备聊天历史和上下文
     chat_history = conversation.get("messages", [])
-    group_ids = conversation.get("group_ids", [])
+    
+    # 4. 确定使用哪些知识库组
+    # 如果请求中指定了知识库组，使用请求中的；否则使用会话中保存的
+    group_ids = data.group_ids if data.group_ids is not None else conversation.get("group_ids", [])
 
-    # 4. 创建流式响应生成器
+    # 5. 创建流式响应生成器
     def generate():
         try:
             # 注意：这里假设RAG引擎支持流式响应
@@ -584,9 +635,13 @@ def stream_message_to_conversation(conversation_id: str):
             answer = str(response)
             source_nodes = []
             if hasattr(response, "source_nodes") and response.source_nodes:
-                source_nodes = [
-                    SourceNodeModel.from_source_node(n) for n in response.source_nodes
-                ]
+                try:
+                    source_nodes = [
+                        SourceNodeModel.from_source_node(n) for n in response.source_nodes
+                    ]
+                except Exception as e:
+                    current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
+                    # 如果处理源节点出错，使用空列表
             
             # 保存助手消息到历史记录
             pipeline.conversation_manager.add_message_to_conversation(
@@ -598,7 +653,7 @@ def stream_message_to_conversation(conversation_id: str):
                 answer=answer,
                 sources=source_nodes,
             )
-            
+
             # 返回JSON格式的完整响应
             yield full_response.model_dump_json()
             
@@ -608,3 +663,147 @@ def stream_message_to_conversation(conversation_id: str):
 
     # 设置响应头并返回流式响应
     return Response(generate(), mimetype='application/json')
+
+
+@api.route("/conversations/<conversation_id>/regenerate/stream", methods=["POST"])
+def regenerate_message_stream(conversation_id: str):
+    """流式重新生成助手消息。"""
+    pipeline = get_rag_pipeline()
+
+    # 1. 验证对话是否存在
+    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+
+    # 2. 验证请求数据
+    try:
+        data = MessageRegenerateRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    # 3. 验证消息索引是否有效
+    messages = conversation.get("messages", [])
+    if data.from_message_index < 1 or data.from_message_index >= len(messages):
+        return jsonify({"error": "无效的消息索引。"}), 400
+
+    # 4. 确保要重新生成的消息是助手消息
+    if messages[data.from_message_index]["role"] != "assistant":
+        return jsonify({"error": "只能重新生成助手消息。"}), 400
+
+    # 5. 找到前一条用户消息
+    user_message_index = data.from_message_index - 1
+    if user_message_index < 0 or messages[user_message_index]["role"] != "user":
+        return jsonify({"error": "找不到对应的用户消息。"}), 400
+
+    user_message = messages[user_message_index]["content"]
+
+    # 6. 准备聊天历史（只包含到用户消息之前的历史）
+    chat_history = messages[:user_message_index]
+    
+    # 7. 获取知识库组ID
+    group_ids = conversation.get("group_ids", [])
+
+    # 8. 创建流式响应生成器
+    def generate():
+        try:
+            # 重新生成回复
+            response = pipeline.chat(
+                query_text=user_message,
+                chat_history=chat_history,
+                group_ids=group_ids,
+            )
+            
+            # 更新助手消息
+            pipeline.conversation_manager.delete_messages_from_index(
+                conversation_id, user_message_index
+            )
+            pipeline.conversation_manager.add_message_to_conversation(
+                conversation_id, "user", user_message
+            )
+            pipeline.conversation_manager.add_message_to_conversation(
+                conversation_id, "assistant", str(response)
+            )
+            
+            # 构建响应
+            source_nodes = []
+            if hasattr(response, "source_nodes") and response.source_nodes:
+                try:
+                    source_nodes = [
+                        SourceNodeModel.from_source_node(n) for n in response.source_nodes
+                    ]
+                except Exception as e:
+                    current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
+                    # 如果处理源节点出错，使用空列表
+            
+            # 构建完整响应
+            full_response = QueryResponse(
+                answer=str(response),
+                sources=source_nodes,
+            )
+            
+            # 返回JSON格式的完整响应
+            yield full_response.model_dump_json()
+            
+        except Exception as e:
+            current_app.logger.error(f"重新生成消息期间出错: {e}", exc_info=True)
+            yield jsonify({"error": "处理重新生成请求时发生内部错误。"}).get_data(as_text=True)
+
+    # 设置响应头并返回流式响应
+    return Response(generate(), mimetype='application/json')
+
+
+@api.route("/conversations/<conversation_id>/messages", methods=["DELETE"])
+def delete_messages_from_conversation(conversation_id: str):
+    """删除指定对话中从特定索引开始的所有消息。"""
+    pipeline = get_rag_pipeline()
+
+    # 验证对话是否存在
+    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+    
+    # 验证请求数据
+    try:
+        data = MessagesDeleteRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+    
+    # 删除消息
+    if pipeline.conversation_manager.delete_messages_from_index(conversation_id, data.from_index):
+        return jsonify({"message": "消息已成功删除。"}), 200
+    else:
+        return jsonify({"error": "删除消息失败。"}), 400
+
+
+@api.route("/conversations/<conversation_id>/groups", methods=["POST"])
+def update_conversation_groups(conversation_id: str):
+    """更新对话关联的知识库组。"""
+    pipeline = get_rag_pipeline()
+    
+    # 验证对话是否存在
+    conversation = pipeline.conversation_manager.get_conversation(conversation_id)
+    if not conversation:
+        return jsonify({"error": "对话未找到。"}), 404
+    
+    # 验证请求数据
+    try:
+        data = ConversationGroupsUpdateRequest.model_validate(request.json)
+    except ValidationError as e:
+        return handle_validation_error(e)
+    
+    # 验证所有提供的 group_id 是否都存在
+    if data.group_ids:
+        all_group_ids = {g["id"] for g in pipeline.list_all_groups()}
+        invalid_ids = [gid for gid in data.group_ids if gid not in all_group_ids]
+        if invalid_ids:
+            return jsonify({"error": "提供的组 ID 无效", "invalid_ids": invalid_ids}), 400
+    
+    # 更新对话关联的知识库组
+    conversation["group_ids"] = data.group_ids
+    
+    # 保存更新后的对话
+    with open(pipeline.conversation_manager._get_conv_path(conversation_id), "w", encoding="utf-8") as f:
+        import json
+        json.dump(conversation, f, indent=4)
+    
+    return jsonify({"message": "对话关联知识库组已更新。"}), 200
