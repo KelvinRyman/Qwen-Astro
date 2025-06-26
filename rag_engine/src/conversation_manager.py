@@ -45,7 +45,7 @@ class ConversationManager:
             return json.load(f)
 
     def add_message_to_conversation(
-        self, conversation_id: str, role: str, content: str, sources: Optional[List[Dict]] = None
+        self, conversation_id: str, role: str, content: Any, sources: Optional[List[Dict]] = None
     ):
         conversation = self.get_conversation(conversation_id)
         if not conversation:
@@ -87,19 +87,7 @@ class ConversationManager:
                 conv_data = self.get_conversation(conv_id)
                 if conv_data:
                     # 返回一个简化的摘要，而不是完整的消息历史
-                    conversations.append(
-                        {
-                            "id": conv_data["id"],
-                            "title": conv_data.get("title", "新对话"),  # 确保有标题
-                            "created_at": conv_data["created_at"],
-                            "group_ids": conv_data.get("group_ids", []),
-                            "last_message": (
-                                conv_data["messages"][-1]["content"][:50] + "..."
-                                if conv_data["messages"]
-                                else "空对话"
-                            ),
-                        }
-                    )
+                    conversations.append(self._create_conversation_summary(conv_data))
         # 按创建时间降序排序
         conversations.sort(key=lambda x: x["created_at"], reverse=True)
         return conversations
@@ -147,21 +135,41 @@ class ConversationManager:
 
                 # 检查消息内容
                     for message in conversation.get("messages", []):
-                        if query.lower() in message.get("content", "").lower():
+                        content = message.get("content", "")
+                        # 处理多模态消息内容
+                        if isinstance(content, dict) and content.get("type") == "multimodal":
+                            content = content.get("text", "")
+                        elif isinstance(content, str):
+                            pass  # 保持原样
+                        else:
+                            content = str(content)  # 转换为字符串
+
+                        if query.lower() in content.lower():
                             matching_conversations.append(self._create_conversation_summary(conversation))
                             break
         return matching_conversations
 
     def _create_conversation_summary(self, conversation: Dict) -> Dict:
         """创建对话摘要。"""
+        last_message = "空对话"
+        if conversation["messages"]:
+            content = conversation["messages"][-1]["content"]
+            # 处理多模态消息内容
+            if isinstance(content, dict) and content.get("type") == "multimodal":
+                text_content = content.get("text", "")
+                if content.get("images"):
+                    last_message = f"{text_content[:40]}... [包含图片]"
+                else:
+                    last_message = text_content[:50] + "..." if len(text_content) > 50 else text_content
+            elif isinstance(content, str):
+                last_message = content[:50] + "..." if len(content) > 50 else content
+            else:
+                last_message = str(content)[:50] + "..."
+
         return {
             "id": conversation["id"],
             "title": conversation.get("title", "新对话"),
             "created_at": conversation["created_at"],
             "group_ids": conversation.get("group_ids", []),
-            "last_message": (
-                conversation["messages"][-1]["content"][:50] + "..."
-                if conversation["messages"]
-                else "空对话"
-            ),
+            "last_message": last_message,
         }

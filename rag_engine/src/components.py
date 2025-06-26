@@ -14,7 +14,11 @@ from .utils import ensure_directory_exists
 def setup_global_settings(config: RAGConfig):
     """配置 LlamaIndex 的全局设置"""
     # 1. 配置 LLM
-    llm = GoogleGenAI(model=config.LLM_MODEL_NAME, api_key=config.LLM_API_KEY)
+    llm = GoogleGenAI(
+        temperature=config.TEMPERATURE,
+        model=config.LLM_MODEL_NAME,
+        api_key=config.LLM_API_KEY,
+    )
     Settings.llm = llm
     logging.info(f"大语言模型已配置: {Settings.llm.model}")
 

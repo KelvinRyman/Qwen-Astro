@@ -114,7 +114,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // 发送消息
-  async function sendMessage(message: string, groupIds?: string[], agentId?: string): Promise<QueryResponse | null> {
+  async function sendMessage(message: string, groupIds?: string[], agentId?: string, enableDeepThinking?: boolean, enableWebSearch?: boolean, images?: string[]): Promise<QueryResponse | null> {
     error.value = null;
 
     try {
@@ -131,10 +131,26 @@ export const useChatStore = defineStore('chat', () => {
         currentConversation.value.messages = [];
       }
       
+      // 构建用户消息内容
+      let userMessageContent: any = message;
+      if (images && images.length > 0) {
+        // 多模态消息格式
+        userMessageContent = [
+          { type: 'text', text: message }
+        ];
+        images.forEach(imageBase64 => {
+          userMessageContent.push({
+            type: 'image_url',
+            image_url: { url: `data:image/jpeg;base64,${imageBase64}` }
+          });
+        });
+      }
+
       currentConversation.value.messages.push({
         role: 'user',
-        content: message,
-        group_ids: groupIds && groupIds.length > 0 ? groupIds : undefined
+        content: userMessageContent,
+        group_ids: groupIds && groupIds.length > 0 ? groupIds : undefined,
+        images: images // 保存原始base64数据用于API调用
       });
       
       // 添加一个空的助手消息，标记为正在生成
@@ -157,7 +173,10 @@ export const useChatStore = defineStore('chat', () => {
           (chunk) => {
             if (currentConversation.value && currentConversation.value.messages[assistantMessageIndex]) {
               // 累加文本块到助手消息
-              currentConversation.value.messages[assistantMessageIndex].content += chunk;
+              const message = currentConversation.value.messages[assistantMessageIndex];
+              message.content += chunk;
+              // 强制触发响应式更新
+              currentConversation.value.messages[assistantMessageIndex] = { ...message };
             }
           },
           // 处理完成回调
@@ -169,16 +188,33 @@ export const useChatStore = defineStore('chat', () => {
               currentConversation.value.messages[assistantMessageIndex].isGenerating = false;
               isGeneratingMessage.value = false;
 
-              // 如果是第一条消息，更新对话标题
-              if (currentConversation.value.messages.length === 2) {
-                // 使用用户消息的前20个字符作为标题
+              // 如果后端返回了新标题，则更新它
+              if (response.new_title) {
+                console.log('接收到后端生成的标题:', response.new_title, '对话ID:', currentConversation.value.id);
+                // 直接调用重命名逻辑，但只更新本地状态，不发送API请求
+                const newTitle = response.new_title;
+                // 更新本地状态
+                chatHistory.value.forEach(group => {
+                  const chat = group.items.find(item => item.id === currentConversation.value!.id);
+                  if (chat) {
+                    chat.title = newTitle;
+                  }
+                });
+                if (currentConversation.value) {
+                  currentConversation.value.title = newTitle;
+                }
+              } else if (currentConversation.value.messages.length === 2) {
+                // Fallback: 如果后端没有返回标题（例如旧版后端），则保持前端逻辑
                 const title = message.length > 20 ? message.substring(0, 20) + '...' : message;
                 renameChat(currentConversation.value.id, title);
               }
             }
           },
-          // 传递知识库组IDs
-          groupIds
+          // 传递知识库组IDs和新功能参数
+          groupIds,
+          enableDeepThinking,
+          enableWebSearch,
+          images
         );
         
         return null; // 由于是流式响应，这里不返回具体内容
@@ -187,7 +223,7 @@ export const useChatStore = defineStore('chat', () => {
         console.error('流式API失败，回退到普通API:', err);
         
         // 发送普通请求
-        const response = await chatApi.sendMessage(currentConversation.value.id, message, groupIds);
+        const response = await chatApi.sendMessage(currentConversation.value.id, message, groupIds, enableDeepThinking, enableWebSearch, images);
         
         // 更新助手消息
         if (currentConversation.value && currentConversation.value.messages[assistantMessageIndex]) {
@@ -199,8 +235,9 @@ export const useChatStore = defineStore('chat', () => {
         
         // 如果是第一条消息，更新对话标题
         if (currentConversation.value.messages.length === 2) {
-          // 使用用户消息的前20个字符作为标题
-          const title = message.length > 20 ? message.substring(0, 20) + '...' : message;
+          // 使用用户消息的前30个字符作为标题
+          const title = message.length > 30 ? message.substring(0, 30) + '...' : message;
+          console.log('自动生成对话标题（非流式）:', title, '对话ID:', currentConversation.value.id);
           renameChat(currentConversation.value.id, title);
         }
         
@@ -226,22 +263,27 @@ export const useChatStore = defineStore('chat', () => {
   // 重命名聊天
   async function renameChat(chatId: string, newTitle: string) {
     if (!newTitle.trim()) return;
-    
+
+    console.log('开始重命名对话:', chatId, '新标题:', newTitle.trim());
+
     try {
       // 调用API重命名对话
       await chatApi.renameConversation(chatId, newTitle.trim());
-      
+      console.log('API重命名成功');
+
       // 更新本地状态
       chatHistory.value.forEach(group => {
         const chat = group.items.find(item => item.id === chatId);
         if (chat) {
           chat.title = newTitle.trim();
+          console.log('更新聊天历史中的标题');
         }
       });
-      
+
       // 如果是当前对话，也更新当前对话的标题
       if (currentConversation.value && currentConversation.value.id === chatId) {
         currentConversation.value.title = newTitle.trim();
+        console.log('更新当前对话标题');
       }
     } catch (err) {
       console.error('重命名对话失败:', err);

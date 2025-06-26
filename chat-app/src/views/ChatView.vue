@@ -13,7 +13,7 @@
           <!-- 用户消息 -->
           <div v-if="message.role === 'user'" class="user-message-wrapper">
             <div class="user-message">
-              {{ message.content }}
+              <MessageContent :content="message.content" message-type="user" />
             </div>
             <!-- 用户消息操作按钮 -->
             <div class="message-actions user-message-actions">
@@ -36,8 +36,11 @@
               :sources="message.sources"
             />
             <div class="assistant-message">
-              {{ message.content }}
-              <span v-if="message.isGenerating" class="generating-cursor"></span>
+              <MessageContent
+                :content="message.content"
+                :is-generating="message.isGenerating"
+                message-type="assistant"
+              />
             </div>
             <!-- 只在消息生成完毕后显示操作按钮 -->
             <div v-if="!message.isGenerating" class="message-actions">
@@ -57,6 +60,18 @@
     
     <!-- 输入区域：始终显示 -->
     <div class="input-container">
+      <!-- 图片预览区域 -->
+      <div v-if="hasImages" class="image-preview-container">
+        <ImageThumbnail :images="selectedImages" @remove="removeImage" />
+      </div>
+
+      <!-- 错误提示 -->
+      <div v-if="imageUploadErrors.length > 0" class="error-toast">
+        <div v-for="(error, index) in imageUploadErrors" :key="index" class="error-message">
+          {{ error.file ? `${error.file}: ` : '' }}{{ error.error }}
+        </div>
+      </div>
+
       <div class="input-box-wrapper">
         <textarea
           ref="textareaRef"
@@ -69,29 +84,61 @@
         ></textarea>
         <div class="input-actions">
           <div class="actions-left">
-            <button class="input-icon-button">
+            <button
+              class="input-icon-button"
+              :class="{ 'image-selected': hasImages, 'drag-over': isDragOver }"
+              @click="openFileSelector"
+              @dragover="onDragOver"
+              @dragenter="onDragEnter"
+              @dragleave="onDragLeave"
+              @drop="onDrop"
+              title="上传图片"
+            >
               <Icon name="plus" />
             </button>
             <div ref="toolMenuContainerRef" class="tool-button-wrapper">
-              <button class="input-icon-button" @click="isToolMenuOpen = !isToolMenuOpen">
+              <button
+                class="input-icon-button"
+                :class="{ 'tool-selected': hasSelectedTool }"
+                @click="isToolMenuOpen = !isToolMenuOpen"
+              >
                 <Icon name="tool" />
               </button>
               <div v-if="isToolMenuOpen" class="tool-menu">
-                <button class="tool-menu-item">
-                  <Icon name="think" />
-                  <span>深度思考</span>
+                <button
+                  class="tool-menu-item"
+                  :class="{ 'selected': isDeepThinkingEnabled }"
+                  @click="toggleDeepThinking"
+                >
+                  <div class="left-content">
+                    <Icon name="think" />
+                    <span>深度思考</span>
+                  </div>
+                  <Icon v-if="isDeepThinkingEnabled" name="check" class="check-icon" />
                 </button>
-                <button class="tool-menu-item">
-                  <Icon name="web" />
-                  <span>搜索网页</span>
+                <button
+                  class="tool-menu-item"
+                  :class="{ 'selected': isWebSearchEnabled }"
+                  @click="toggleWebSearch"
+                >
+                  <div class="left-content">
+                    <Icon name="web" />
+                    <span>搜索网页</span>
+                  </div>
+                  <Icon v-if="isWebSearchEnabled" name="check" class="check-icon" />
                 </button>
               </div>
             </div>
             <div ref="knowledgeMenuContainerRef" class="knowledge-button-wrapper">
               <button
                 class="input-icon-button"
-                :class="{ 'knowledge-selected': hasSelectedKnowledgeBase }"
+                :class="{
+                  'knowledge-selected': hasSelectedKnowledgeBase,
+                  'disabled': !canSelectKnowledgeBase
+                }"
+                :disabled="!canSelectKnowledgeBase"
                 @click="toggleKnowledgeBaseModal"
+                :title="!canSelectKnowledgeBase ? '图片模式下无法使用知识库' : '选择知识库'"
               >
                 <Icon name="knowledge" />
               </button>
@@ -150,6 +197,10 @@ import { useChatStore } from '@/stores/chat'
 import KnowledgeBaseSelectModal from '@/components/KnowledgeBaseSelectModal.vue'
 import AgentSelectModal from '@/components/AgentSelectModal.vue'
 import CitationContainer from '@/components/CitationContainer.vue'
+import MessageContent from '@/components/MessageContent.vue'
+import ImageThumbnail from '@/components/ImageThumbnail.vue'
+import { useImageUpload } from '@/composables/useImageUpload'
+import { extractTextFromMessageContent } from '@/utils/messageUtils'
 
 const welcomeMessages = [
   '一小步和一大步。',
@@ -169,10 +220,42 @@ const messagesContainerRef = ref<HTMLElement | null>(null)
 
 const isToolMenuOpen = ref(false)
 const toolMenuContainerRef = ref<HTMLElement | null>(null)
+const isDeepThinkingEnabled = ref(false)
+const isWebSearchEnabled = ref(false)
 const knowledgeMenuContainerRef = ref<HTMLElement | null>(null)
 const isKnowledgeBaseModalOpen = ref(false)
 const agentMenuContainerRef = ref<HTMLElement | null>(null)
 const isAgentModalOpen = ref(false)
+
+// 图片上传相关状态
+const imageUploadErrors = ref<{ file: string; error: string }[]>([])
+const {
+  selectedImages,
+  isUploading: isImageUploading,
+  isDragOver,
+  hasImages,
+  imageCount,
+  openFileSelector,
+  removeImage,
+  clearImages,
+  getImageBase64List,
+  onDragOver,
+  onDragEnter,
+  onDragLeave,
+  onDrop
+} = useImageUpload({
+  maxImages: 5, // 限制最多5张图片
+  onError: (errors) => {
+    imageUploadErrors.value.push(...errors)
+    // 3秒后自动清除错误信息
+    setTimeout(() => {
+      imageUploadErrors.value = []
+    }, 3000)
+  },
+  onSuccess: (images) => {
+    console.log('成功添加图片:', images)
+  }
+})
 
 // 获取路由和聊天存储
 const route = useRoute()
@@ -201,10 +284,21 @@ const hasSelectedAgent = computed(() => {
   return currentConversation.value?.agent_id != null
 })
 
+// 计算是否选择了工具
+const hasSelectedTool = computed(() => {
+  return isDeepThinkingEnabled.value || isWebSearchEnabled.value || hasImages.value
+})
+
+// 图片模式与知识库互斥
+const canSelectKnowledgeBase = computed(() => {
+  return !hasImages.value
+})
+
 // 复制文本到剪贴板
-const copyToClipboard = async (text: string) => {
+const copyToClipboard = async (content: any) => {
   try {
-    await navigator.clipboard.writeText(text);
+    const textToCopy = extractTextFromMessageContent(content);
+    await navigator.clipboard.writeText(textToCopy);
     // 可以添加一个临时提示，表示复制成功
     console.log('文本已复制到剪贴板');
   } catch (err) {
@@ -227,6 +321,14 @@ const regenerateMessage = async (messageIndex: number) => {
 watch(() => currentConversation.value?.messages, () => {
   scrollToBottom()
 }, { deep: true })
+
+// 监听图片选择状态，实现与知识库的互斥逻辑
+watch(hasImages, (newValue) => {
+  if (newValue && currentConversation.value?.group_ids?.length) {
+    // 当选择图片时，清除知识库选择
+    handleKnowledgeBaseUpdate([])
+  }
+})
 
 // 监听路由参数变化
 watch(() => route.params.id, async (newId) => {
@@ -254,6 +356,36 @@ const scrollToBottom = () => {
 const handleClickOutside = (event: MouseEvent) => {
   if (toolMenuContainerRef.value && !toolMenuContainerRef.value.contains(event.target as Node)) {
     isToolMenuOpen.value = false
+  }
+}
+
+// 切换深度思考功能
+const toggleDeepThinking = () => {
+  isDeepThinkingEnabled.value = !isDeepThinkingEnabled.value
+
+  // 如果启用深度思考，自动关闭RAG（清除选中的知识库）
+  if (isDeepThinkingEnabled.value && currentConversation.value) {
+    // 清除知识库选择
+    if (currentConversation.value.id) {
+      chatStore.updateConversationGroups(currentConversation.value.id, [])
+    } else {
+      currentConversation.value.group_ids = []
+    }
+  }
+}
+
+// 切换网页搜索功能
+const toggleWebSearch = () => {
+  isWebSearchEnabled.value = !isWebSearchEnabled.value
+
+  // 如果启用网页搜索，自动关闭RAG（清除选中的知识库）
+  if (isWebSearchEnabled.value && currentConversation.value) {
+    // 清除知识库选择
+    if (currentConversation.value.id) {
+      chatStore.updateConversationGroups(currentConversation.value.id, [])
+    } else {
+      currentConversation.value.group_ids = []
+    }
   }
 }
 
@@ -291,9 +423,16 @@ const sendMessage = async () => {
 
   // 发送消息
   // 获取要使用的知识库组ID和Agent ID
-  const groupIdsToUse = getKnowledgeBaseGroupIds()
+  // 根据互斥逻辑，如果启用了联网、深度思考或图片模式，则不使用知识库
+  const groupIdsToUse = (isWebSearchEnabled.value || isDeepThinkingEnabled.value || hasImages.value) ? [] : getKnowledgeBaseGroupIds()
   const agentIdToUse = currentConversation.value?.agent_id || undefined
-  await chatStore.sendMessage(message, groupIdsToUse, agentIdToUse)
+  const imagesToUse = hasImages.value ? getImageBase64List() : []
+  await chatStore.sendMessage(message, groupIdsToUse, agentIdToUse, isDeepThinkingEnabled.value, isWebSearchEnabled.value, imagesToUse)
+
+  // 发送后清空图片
+  if (hasImages.value) {
+    clearImages()
+  }
 
   // 滚动到底部
   scrollToBottom()
@@ -334,6 +473,12 @@ const toggleAgentModal = () => {
 // 处理知识库更新
 const handleKnowledgeBaseUpdate = (selectedGroupIds: string[]) => {
   if (currentConversation.value) {
+    // 如果选择了知识库，自动关闭工具选项（互斥逻辑）
+    if (selectedGroupIds.length > 0) {
+      isDeepThinkingEnabled.value = false
+      isWebSearchEnabled.value = false
+    }
+
     // 如果是已存在的对话，更新对话关联的知识库组
     if (currentConversation.value.id) {
       chatStore.updateConversationGroups(currentConversation.value.id, selectedGroupIds)
@@ -464,21 +609,7 @@ onUnmounted(() => {
   margin-bottom: 8px;
 }
 
-/* 生成中的光标效果 */
-.generating-cursor {
-  display: inline-block;
-  width: 8px;
-  height: 16px;
-  background-color: var(--text-primary);
-  margin-left: 2px;
-  animation: blink 1s infinite;
-  vertical-align: middle;
-}
 
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
 
 /* 消息操作按钮 */
 .message-actions {
@@ -560,6 +691,28 @@ onUnmounted(() => {
   margin: 0 auto;
 }
 
+.image-preview-container {
+  margin-bottom: 12px;
+}
+
+.error-toast {
+  background: #fee;
+  border: 1px solid #fcc;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.error-message {
+  color: #c33;
+  margin-bottom: 4px;
+}
+
+.error-message:last-child {
+  margin-bottom: 0;
+}
+
 .input-box-wrapper {
   display: flex;
   flex-direction: column;
@@ -622,6 +775,26 @@ onUnmounted(() => {
   background-color: #4f5058;
 }
 
+.input-icon-button.image-selected {
+  background-color: var(--accent-color);
+  color: white;
+}
+
+.input-icon-button.drag-over {
+  background-color: var(--accent-color);
+  color: white;
+  transform: scale(1.05);
+}
+
+.input-icon-button.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.input-icon-button.disabled:hover {
+  background-color: transparent;
+}
+
 .input-icon-button.with-text {
   border-radius: 8px;
   padding: 6px 12px;
@@ -671,13 +844,14 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 4px;
   z-index: 10;
-  width: max-content;
+  width: 180px; /* 固定宽度确保布局一致性 */
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
 .tool-menu-item {
   display: flex;
   align-items: center;
+  justify-content: space-between; /* 确保check图标在右侧 */
   gap: 8px;
   background: transparent;
   border: none;
@@ -688,14 +862,48 @@ onUnmounted(() => {
   width: 100%;
   text-align: left;
   font-size: 14px;
+  transition: all 0.2s ease;
 }
 
 .tool-menu-item:hover {
   background-color: #4f5058;
 }
 
+/* 选中状态样式 */
+.tool-menu-item.selected {
+  background-color: var(--interactive-label-background-default);
+  color: var(--interactive-label-accent-default);
+}
+
+.tool-menu-item.selected:hover {
+  background-color: var(--interactive-label-background-hover); /* 使用蓝色的半透明背景 */
+}
+
+/* 左侧内容容器 */
+.tool-menu-item .left-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* check图标样式 */
+.check-icon {
+  color: var(--interactive-label-accent-default);
+  flex-shrink: 0;
+}
+
 .tool-menu-item :deep(svg) {
   font-size: 20px;
+}
+
+/* 工具按钮选中状态样式 */
+.input-icon-button.tool-selected {
+  background-color: var(--interactive-label-background-default); /* 蓝色背景 */
+  color: var(--interactive-label-accent-default);
+}
+
+.input-icon-button.tool-selected:hover {
+  background-color: var(--interactive-label-background-hover); /* 悬停时稍微深一点的蓝色 */
 }
 
 /* 知识库按钮选中状态样式 */

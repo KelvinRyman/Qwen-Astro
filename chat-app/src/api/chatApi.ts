@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { convertBackendMessageContent } from '@/utils/messageUtils';
 
 // API基础URL
 const API_BASE_URL = 'http://127.0.0.1:5000/api';
@@ -23,13 +24,29 @@ export interface Conversation {
   messages: Message[];
 }
 
+// 多模态内容类型定义
+export interface TextContent {
+  type: 'text';
+  text: string;
+}
+
+export interface ImageContent {
+  type: 'image_url';
+  image_url: {
+    url: string; // base64格式: data:image/jpeg;base64,xxx
+  };
+}
+
+export type MessageContent = string | (TextContent | ImageContent)[];
+
 export interface Message {
   role: 'user' | 'assistant';
-  content: string;
+  content: MessageContent;
   timestamp?: string;
   isGenerating?: boolean;
   group_ids?: string[]; // 用户消息关联的知识库组ID
   sources?: SourceNode[]; // 助手消息的引用来源
+  images?: string[]; // 用于UI显示的图片base64数组（不包含data:前缀）
 }
 
 export interface ConversationSummary {
@@ -67,7 +84,17 @@ export const chatApi = {
   // 获取单个对话详情
   async getConversation(conversationId: string): Promise<Conversation> {
     const response = await apiClient.get(`/conversations/${conversationId}`);
-    return response.data;
+    const conversation = response.data;
+
+    // 转换消息内容格式
+    if (conversation.messages) {
+      conversation.messages = conversation.messages.map((message: any) => ({
+        ...message,
+        content: convertBackendMessageContent(message.content)
+      }));
+    }
+
+    return conversation;
   },
 
   // 创建新对话
@@ -80,10 +107,13 @@ export const chatApi = {
   },
 
   // 发送消息到对话
-  async sendMessage(conversationId: string, message: string, groupIds?: string[]): Promise<QueryResponse> {
+  async sendMessage(conversationId: string, message: string, groupIds?: string[], enableDeepThinking?: boolean, enableWebSearch?: boolean, images?: string[]): Promise<QueryResponse> {
     const response = await apiClient.post(`/conversations/${conversationId}/messages`, {
       message,
-      group_ids: groupIds
+      group_ids: groupIds,
+      enable_deep_thinking: enableDeepThinking || false,
+      enable_web_search: enableWebSearch || false,
+      images: images || []
     });
     return response.data;
   },
@@ -178,11 +208,14 @@ export const chatApi = {
 
   // 发送消息到对话（流式响应）
   async sendMessageStreamed(
-    conversationId: string, 
-    message: string, 
-    onChunk: (chunk: string) => void, 
+    conversationId: string,
+    message: string,
+    onChunk: (chunk: string) => void,
     onComplete: (response: QueryResponse) => void,
-    groupIds?: string[]
+    groupIds?: string[],
+    enableDeepThinking?: boolean,
+    enableWebSearch?: boolean,
+    images?: string[]
   ): Promise<void> {
     try {
       // 创建请求
@@ -191,9 +224,12 @@ export const chatApi = {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           message,
-          group_ids: groupIds
+          group_ids: groupIds,
+          enable_deep_thinking: enableDeepThinking || false,
+          enable_web_search: enableWebSearch || false,
+          images: images || []
         })
       });
 
@@ -203,25 +239,55 @@ export const chatApi = {
         throw new Error('无法创建响应流读取器');
       }
 
-      // 用于存储完整响应
-      let fullResponse = '';
-      
+      // 用于存储完整文本和sources
+      let fullText = '';
+      let sources: SourceNode[] = [];
+      const decoder = new TextDecoder();
+
       // 读取流
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         // 解码接收到的块
-        const chunk = new TextDecoder().decode(value);
-        fullResponse += chunk;
-        
-        // 调用回调函数处理新块
-        onChunk(chunk);
+        const chunk = decoder.decode(value, { stream: true });
+
+        // 处理Server-Sent Events格式
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6); // 移除 'data: ' 前缀
+
+            if (data === '[DONE]') {
+              // 流结束标记
+              continue;
+            }
+
+            try {
+              // 尝试解析JSON（可能是完成信息）
+              const parsed = JSON.parse(data);
+              if (parsed.type === 'complete') {
+                sources = parsed.sources || [];
+              } else if (parsed.error) {
+                throw new Error(parsed.error);
+              }
+            } catch (e) {
+              // 如果不是JSON，则是文本内容
+              if (data && data !== '[DONE]') {
+                fullText += data;
+                onChunk(data);
+              }
+            }
+          }
+        }
       }
-      
-      // 完成后解析完整响应并调用完成回调
-      const jsonResponse = JSON.parse(fullResponse);
-      onComplete(jsonResponse);
+
+      // 完成后调用完成回调
+      const finalResponse: QueryResponse = {
+        answer: fullText,
+        sources: sources
+      };
+      onComplete(finalResponse);
     } catch (error) {
       console.error('流式发送消息失败:', error);
       throw error;
@@ -230,9 +296,9 @@ export const chatApi = {
 
   // 重新生成消息（流式响应）
   async regenerateMessageStreamed(
-    conversationId: string, 
+    conversationId: string,
     fromMessageIndex: number,
-    onChunk: (chunk: string) => void, 
+    onChunk: (chunk: string) => void,
     onComplete: (response: QueryResponse) => void
   ): Promise<void> {
     try {
@@ -249,21 +315,54 @@ export const chatApi = {
         throw new Error('无法创建响应流读取器');
       }
 
-      let fullResponse = '';
+      // 用于存储完整文本和sources
+      let fullText = '';
+      let sources: SourceNode[] = [];
       const decoder = new TextDecoder();
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
+        // 解码接收到的块
         const chunk = decoder.decode(value, { stream: true });
-        fullResponse += chunk;
-        onChunk(chunk); // 直接传递原始块
+
+        // 处理Server-Sent Events格式
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6); // 移除 'data: ' 前缀
+
+            if (data === '[DONE]') {
+              // 流结束标记
+              continue;
+            }
+
+            try {
+              // 尝试解析JSON（可能是完成信息）
+              const parsed = JSON.parse(data);
+              if (parsed.type === 'complete') {
+                sources = parsed.sources || [];
+              } else if (parsed.error) {
+                throw new Error(parsed.error);
+              }
+            } catch (e) {
+              // 如果不是JSON，则是文本内容
+              if (data && data !== '[DONE]') {
+                fullText += data;
+                onChunk(data);
+              }
+            }
+          }
+        }
       }
-      
-      // 流结束后，fullResponse包含完整的JSON对象
-      const jsonResponse = JSON.parse(fullResponse);
-      onComplete(jsonResponse);
+
+      // 完成后调用完成回调
+      const finalResponse: QueryResponse = {
+        answer: fullText,
+        sources: sources
+      };
+      onComplete(finalResponse);
 
     } catch (error) {
       console.error('流式重新生成消息失败:', error);

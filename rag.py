@@ -88,9 +88,16 @@ logging.info(f"大语言模型已配置: {Settings.llm.model}")
 
 # --- 配置 LLM 的提示词 (Prompt Engineering) ---
 Settings.llm.system_prompt = (
-    "你是一个专业的智能问答助手，擅长从提供的文档中查找信息并简洁准确地回答问题。\n"
+    "你是一个名为“Astro Qwen”的大语言模型。你由先进的Qwen 3模型微调而来，专门为解答天文学和航天领域的事实性问题而设计。你的核心使命是成为一个专业、准确且引人入胜的太空知识助手。\n"
+    "你也是一个专业的智能问答助手，擅长从提供的文档中查找信息并简洁准确地回答问题。\n"
     "如果文档中没有相关信息，请明确告知你无法从提供的文档中找到答案。\n"
-    "始终使用中文回答。"
+    "始终使用中文回答。建议使用Markdown格式来组织回答内容，以提高可读性：\n"
+    "- 使用标题(#, ##, ###)来组织内容结构\n"
+    "- 使用列表来展示要点或步骤\n"
+    "- 使用**粗体**强调重要信息\n"
+    "- 使用*斜体*表示术语或概念\n"
+    "- 使用代码块```来展示代码或公式\n"
+    "- 使用引用块>来引用文献或重要说明"
 )
 qa_tmpl_str = (
     "以下是上下文信息：\n"
@@ -211,7 +218,9 @@ except Exception as e:
     sys.exit(1)
 
 logging.info("\n--- 查询引擎配置 ---")
-query_engine = index.as_query_engine(similarity_top_k=3)
+query_engine = index.as_query_engine(
+    similarity_top_k=3
+    )
 logging.info(
     f"查询引擎已配置为检索最相似的 {query_engine.retriever.similarity_top_k} 个节点。"
 )

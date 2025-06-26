@@ -1,6 +1,8 @@
 import os
 import uuid
 import threading
+import logging
+import json
 from flask import Blueprint, request, jsonify, current_app, Response
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import HTTPException
@@ -572,21 +574,34 @@ def post_message_to_conversation(conversation_id: str):
     # 如果请求中指定了知识库组，使用请求中的；否则使用会话中保存的
     group_ids = data.group_ids if data.group_ids is not None else conversation.get("group_ids", [])
     
-    # 5. 调用 RAG 引擎
+    # 5. 调用 RAG 引擎（智能路由）
     try:
         response = pipeline.chat(
             query_text=data.message,
             chat_history=chat_history,
             group_ids=group_ids,
             agent_id=conversation.get("agent_id"),
+            enable_deep_thinking=data.enable_deep_thinking,
+            enable_web_search=data.enable_web_search,
+            images=data.images,
         )
     except Exception as e:
         current_app.logger.error(f"聊天处理期间出错: {e}", exc_info=True)
         return jsonify({"error": "处理聊天时发生内部错误。"}), 500
 
     # 6. 保存新的消息到历史记录
+    # 构建用户消息内容（支持多模态）
+    user_message_content = data.message
+    if data.images and len(data.images) > 0:
+        # 多模态消息格式
+        user_message_content = {
+            "type": "multimodal",
+            "text": data.message,
+            "images": data.images
+        }
+
     pipeline.conversation_manager.add_message_to_conversation(
-        conversation_id, "user", data.message
+        conversation_id, "user", user_message_content
     )
 
     # 处理sources数据用于持久化
@@ -695,55 +710,111 @@ def stream_message_to_conversation(conversation_id: str):
 
     # 5. 创建流式响应生成器
     def generate():
+        # 使用标准logging模块，避免Flask应用上下文问题
+        logger = logging.getLogger(__name__)
         try:
-            # 注意：这里假设RAG引擎支持流式响应
-            # 如果不支持，需要修改RAG引擎或模拟流式响应
-            response = pipeline.chat(
+            # 保存用户消息到历史记录
+            # 构建用户消息内容（支持多模态）
+            user_message_content = data.message
+            if data.images and len(data.images) > 0:
+                # 多模态消息格式
+                user_message_content = {
+                    "type": "multimodal",
+                    "text": data.message,
+                    "images": data.images
+                }
+
+            pipeline.conversation_manager.add_message_to_conversation(
+                conversation_id, "user", user_message_content
+            )
+
+            # 调用流式聊天
+            accumulated_text = ""
+            source_nodes = []
+            source_nodes_data = []
+
+            # 获取流式响应
+            stream_generator = pipeline.chat(
                 query_text=data.message,
                 chat_history=chat_history,
                 group_ids=group_ids,
                 agent_id=conversation.get("agent_id"),
-            )
-            
-            # 保存用户消息到历史记录
-            pipeline.conversation_manager.add_message_to_conversation(
-                conversation_id, "user", data.message
+                enable_deep_thinking=data.enable_deep_thinking,
+                enable_web_search=data.enable_web_search,
+                images=data.images,
+                stream=True
             )
 
-            # 模拟流式输出（实际实现应该从LLM获取流式输出）
-            answer = str(response)
-            source_nodes = []
-            source_nodes_data = []
-            if hasattr(response, "source_nodes") and response.source_nodes:
+            # 流式输出文本内容
+            for chunk in stream_generator:
+                if chunk:
+                    accumulated_text += chunk
+                    # 发送文本块
+                    yield f"data: {chunk}\n\n"
+
+            # 对于RAG模式，我们需要获取source_nodes
+            # 由于流式模式下无法直接获取source_nodes，我们需要重新查询
+            if group_ids and len(group_ids) > 0:
                 try:
-                    source_nodes = [
-                        SourceNodeModel.from_source_node(n) for n in response.source_nodes
-                    ]
-                    source_nodes_data = [node.model_dump() for node in source_nodes]
+                    # 重新执行非流式查询以获取source_nodes
+                    full_response = pipeline.chat(
+                        query_text=data.message,
+                        chat_history=chat_history,
+                        group_ids=group_ids,
+                        agent_id=conversation.get("agent_id"),
+                        enable_deep_thinking=False,  # 避免重复深度思考
+                        enable_web_search=False,     # 避免重复搜索
+                        stream=False
+                    )
+
+                    if hasattr(full_response, "source_nodes") and full_response.source_nodes:
+                        source_nodes = [
+                            SourceNodeModel.from_source_node(n) for n in full_response.source_nodes
+                        ]
+                        source_nodes_data = [node.model_dump() for node in source_nodes]
                 except Exception as e:
-                    current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
-                    # 如果处理源节点出错，使用空列表
+                    logger.error(f"获取源节点时出错: {e}", exc_info=True)
 
             # 保存助手消息和sources数据到历史记录
             pipeline.conversation_manager.add_message_to_conversation(
-                conversation_id, "assistant", answer, sources=source_nodes_data
-            )
-            
-            # 构建完整响应
-            full_response = QueryResponse(
-                answer=answer,
-                sources=source_nodes,
+                conversation_id, "assistant", accumulated_text, sources=source_nodes_data
             )
 
-            # 返回JSON格式的完整响应
-            yield full_response.model_dump_json()
+            # 如果是新对话的第一条消息，生成并保存标题
+            new_title = None
+            # chat_history 是调用前的数据，所以新对话的历史记录为空
+            if not chat_history:
+                try:
+                    title_text = data.message.split('\n')[0]
+                    new_title = title_text[:50] + '...' if len(title_text) > 50 else title_text
+                    pipeline.conversation_manager.rename_conversation(conversation_id, new_title)
+                    logger.info(f"为新对话 {conversation_id} 自动生成标题: {new_title}")
+                except Exception as e:
+                    logger.error(f"为对话 {conversation_id} 生成标题失败: {e}", exc_info=True)
+
+            # 发送结束标记和最终信息（包括sources和新标题）
+            final_response = {
+                "type": "complete",
+                "sources": [node.model_dump() for node in source_nodes],
+            }
+            if new_title:
+                final_response["new_title"] = new_title
             
+            yield f"data: [DONE]\n\n"
+            yield f"data: {json.dumps(final_response)}\n\n"
+
         except Exception as e:
-            current_app.logger.error(f"流式聊天处理期间出错: {e}", exc_info=True)
-            yield jsonify({"error": "处理聊天时发生内部错误。"}).get_data(as_text=True)
+            logger.error(f"流式聊天处理期间出错: {e}", exc_info=True)
+            error_response = {"error": "处理聊天时发生内部错误。"}
+            yield f"data: {json.dumps(error_response)}\n\n"
 
     # 设置响应头并返回流式响应
-    return Response(generate(), mimetype='application/json')
+    return Response(generate(), mimetype='text/plain', headers={
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type'
+    })
 
 
 @api.route("/conversations/<conversation_id>/regenerate/stream", methods=["POST"])
@@ -786,15 +857,8 @@ def regenerate_message_stream(conversation_id: str):
 
     # 8. 创建流式响应生成器
     def generate():
+        logger = logging.getLogger(__name__)
         try:
-            # 重新生成回复
-            response = pipeline.chat(
-                query_text=user_message,
-                chat_history=chat_history,
-                group_ids=group_ids,
-                agent_id=conversation.get("agent_id"),
-            )
-            
             # 更新助手消息
             pipeline.conversation_manager.delete_messages_from_index(
                 conversation_id, user_message_index
@@ -803,39 +867,76 @@ def regenerate_message_stream(conversation_id: str):
                 conversation_id, "user", user_message
             )
 
-            # 构建响应和sources数据
+            # 重新生成回复（流式）
+            accumulated_text = ""
             source_nodes = []
             source_nodes_data = []
-            if hasattr(response, "source_nodes") and response.source_nodes:
+
+            # 获取流式响应
+            stream_generator = pipeline.chat(
+                query_text=user_message,
+                chat_history=chat_history,
+                group_ids=group_ids,
+                agent_id=conversation.get("agent_id"),
+                enable_deep_thinking=False,
+                enable_web_search=False,
+                stream=True
+            )
+
+            # 流式输出文本内容
+            for chunk in stream_generator:
+                if chunk:
+                    accumulated_text += chunk
+                    # 发送文本块
+                    yield f"data: {chunk}\n\n"
+
+            # 对于RAG模式，获取source_nodes
+            if group_ids and len(group_ids) > 0:
                 try:
-                    source_nodes = [
-                        SourceNodeModel.from_source_node(n) for n in response.source_nodes
-                    ]
-                    source_nodes_data = [node.model_dump() for node in source_nodes]
+                    # 重新执行非流式查询以获取source_nodes
+                    full_response = pipeline.chat(
+                        query_text=user_message,
+                        chat_history=chat_history,
+                        group_ids=group_ids,
+                        agent_id=conversation.get("agent_id"),
+                        enable_deep_thinking=False,
+                        enable_web_search=False,
+                        stream=False
+                    )
+
+                    if hasattr(full_response, "source_nodes") and full_response.source_nodes:
+                        source_nodes = [
+                            SourceNodeModel.from_source_node(n) for n in full_response.source_nodes
+                        ]
+                        source_nodes_data = [node.model_dump() for node in source_nodes]
                 except Exception as e:
-                    current_app.logger.error(f"处理源节点时出错: {e}", exc_info=True)
-                    # 如果处理源节点出错，使用空列表
+                    logger.error(f"获取源节点时出错: {e}", exc_info=True)
 
             # 保存助手消息和sources数据
             pipeline.conversation_manager.add_message_to_conversation(
-                conversation_id, "assistant", str(response), sources=source_nodes_data
+                conversation_id, "assistant", accumulated_text, sources=source_nodes_data
             )
-            
-            # 构建完整响应
-            full_response = QueryResponse(
-                answer=str(response),
-                sources=source_nodes,
-            )
-            
-            # 返回JSON格式的完整响应
-            yield full_response.model_dump_json()
-            
+
+            # 发送结束标记和sources信息
+            final_response = {
+                "type": "complete",
+                "sources": [node.model_dump() for node in source_nodes]
+            }
+            yield f"data: [DONE]\n\n"
+            yield f"data: {json.dumps(final_response)}\n\n"
+
         except Exception as e:
-            current_app.logger.error(f"重新生成消息期间出错: {e}", exc_info=True)
-            yield jsonify({"error": "处理重新生成请求时发生内部错误。"}).get_data(as_text=True)
+            logger.error(f"重新生成消息期间出错: {e}", exc_info=True)
+            error_response = {"error": "处理重新生成请求时发生内部错误。"}
+            yield f"data: {json.dumps(error_response)}\n\n"
 
     # 设置响应头并返回流式响应
-    return Response(generate(), mimetype='application/json')
+    return Response(generate(), mimetype='text/plain', headers={
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type'
+    })
 
 
 @api.route("/conversations/<conversation_id>/messages", methods=["DELETE"])

@@ -2,6 +2,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 import ChatView from '@/views/ChatView.vue'
 import KnowledgeBaseView from '@/views/KnowledgeBaseView.vue'
 import AgentView from '@/views/AgentView.vue'
+import MarkdownTest from '@/components/MarkdownTest.vue'
+import ImageUploadTest from '@/views/ImageUploadTest.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -29,6 +31,16 @@ const router = createRouter({
       path: '/agents',
       name: 'Agents',
       component: AgentView,
+    },
+    {
+      path: '/markdown-test',
+      name: 'MarkdownTest',
+      component: MarkdownTest,
+    },
+    {
+      path: '/image-upload-test',
+      name: 'ImageUploadTest',
+      component: ImageUploadTest,
     },
     {
       path: '/about',

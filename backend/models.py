@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List
 import logging
 
 # 获取 logger
@@ -96,43 +96,48 @@ class SourceNodeModel(BaseModel):
             text_snippet = "无法提取文本内容"
             logger.warning(f"提取节点文本时出错: {e}")
 
-        # 确定来源类型和URL - 通过查询group_meta.json
+        # 确定来源类型和URL - 基于metadata结构直接判断
         source_type = "file"  # 默认为文件类型
         source_url = None
 
-        # 尝试通过查询group_meta.json来确定类型
         try:
-            import os
-            import json
+            # 添加调试日志
+            logger.info(f"开始类型识别，node_id: {node_id}")
+            logger.info(f"metadata: {metadata}")
 
-            # 获取group_meta.json的路径
-            group_meta_path = os.path.join("data", "group_meta.json")
-            if os.path.exists(group_meta_path):
-                with open(group_meta_path, "r", encoding="utf-8") as f:
-                    group_meta = json.load(f)
+            # 方法1：检查source_url字段（网页类型的直接标识）
+            source_url = metadata.get("source_url")
+            if source_url:
+                source_type = "webpage"
+                logger.info(f"✅ 通过source_url识别为网页类型，URL: {source_url}")
 
-                # 遍历所有组，查找匹配的ID
-                for group_id, group_data in group_meta.items():
-                    # 检查是否在webpages中
-                    for webpage in group_data.get("webpages", []):
-                        if webpage.get("id") == node_id:
-                            source_type = "webpage"
-                            source_url = webpage.get("url")
-                            break
+            # 方法2：检查webpage_id字段（网页类型的备用标识）
+            elif "webpage_id" in metadata:
+                source_type = "webpage"
+                # 尝试从file_name获取URL（网页的file_name通常是URL）
+                file_name = metadata.get("file_name", "")
+                if file_name.startswith(("http://", "https://")):
+                    source_url = file_name
+                logger.info(f"✅ 通过webpage_id识别为网页类型，URL: {source_url}")
 
-                    # 如果已经找到，跳出外层循环
-                    if source_type == "webpage":
-                        break
+            # 方法3：检查file_id字段或默认为文件类型
+            elif "file_id" in metadata:
+                source_type = "file"
+                logger.info(f"✅ 通过file_id识别为文件类型")
 
-                    # 检查是否在files中（保持默认的file类型）
-                    for file_item in group_data.get("files", []):
-                        if file_item.get("id") == node_id:
-                            source_type = "file"
-                            break
+            else:
+                # 默认为文件类型
+                source_type = "file"
+                logger.info(f"✅ 默认识别为文件类型")
+
+            logger.info(f"最终确定类型: {source_type}, URL: {source_url}")
+
         except Exception as e:
-            # 如果查询失败，回退到原来的逻辑
+            logger.error(f"类型识别时出错: {e}")
+            # 回退逻辑：检查metadata中的url字段
             source_url = metadata.get("url")
             source_type = "webpage" if source_url else "file"
+            logger.info(f"回退到默认逻辑，类型: {source_type}, URL: {source_url}")
 
         return cls(
             id=node_id,
@@ -199,6 +204,9 @@ class MessagePostRequest(BaseModel):
     """发送消息到会话的请求模型"""
     message: str = Field(..., min_length=1, description="用户发送的消息内容")
     group_ids: Optional[List[str]] = None  # 如果提供，则使用RAG；否则使用普通聊天
+    enable_deep_thinking: bool = Field(False, description="是否启用深度思考功能")
+    enable_web_search: bool = Field(False, description="是否启用网页搜索功能")
+    images: Optional[List[str]] = Field(None, description="图片base64数据列表（不包含data:前缀）")
 
 
 class ConversationRenameRequest(BaseModel):

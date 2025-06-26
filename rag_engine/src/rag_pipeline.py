@@ -17,6 +17,7 @@ from .group_manager import GroupManager
 from .data_processor import DataProcessor
 from .conversation_manager import ConversationManager
 from .agent_manager import AgentManager
+from .smart_chat import SmartChatEngine
 
 
 class RAGPipeline:
@@ -35,6 +36,7 @@ class RAGPipeline:
         self.data_processor = DataProcessor(config)
         self.conversation_manager = ConversationManager()
         self.agent_manager = AgentManager(config)
+        self.smart_chat_engine = SmartChatEngine(config)
 
     def initialize(self):
         """
@@ -109,7 +111,7 @@ class RAGPipeline:
         if nodes:
             self.index.insert_nodes(nodes)
             logging.info(f"成功为 {len(added_files_meta)} 个新文件创建并插入了向量。")
-        
+
         return added_files_meta
 
     def add_urls_to_group(self, group_id: str, urls: List[str]) -> List[Dict]:
@@ -127,7 +129,7 @@ class RAGPipeline:
             if self.group_manager.get_webpage_by_url(group_id, url):
                 logging.warning(f"URL '{url}' 已存在于组中，已跳过。")
                 continue
-            
+
             # 2. 添加网页元数据
             webpage_meta = self.group_manager.add_webpage_meta(group_id, url)
             if webpage_meta:
@@ -145,7 +147,7 @@ class RAGPipeline:
         if nodes:
             self.index.insert_nodes(nodes)
             logging.info(f"成功为 {len(added_webpages_meta)} 个新URL创建并插入了向量。")
-            
+
         return added_webpages_meta
 
     def list_all_groups(self) -> List[Dict]:
@@ -262,7 +264,7 @@ class RAGPipeline:
         """
         if not file_ids:
             return True
-        
+
         logging.info(f"准备从组 '{group_id}' 删除 {len(file_ids)} 个文件...")
         all_success = True
 
@@ -291,13 +293,13 @@ class RAGPipeline:
                 # 3. 从元数据文件删除记录
                 if self.group_manager.remove_file_meta(group_id, file_id):
                     logging.info(f"  - 已从元数据中删除 '{file_name}'。")
-                
+
             except Exception as e:
                 logging.error(f"删除文件 '{file_name}' (ID: {file_id}) 时发生严重错误: {e}", exc_info=True)
                 all_success = False
-        
+
         return all_success
-        
+
     def delete_webpages_from_group(self, group_id: str, webpage_ids: List[str]) -> bool:
         """
         从一个组中彻底删除指定的网页。
@@ -323,38 +325,99 @@ class RAGPipeline:
             except Exception as e:
                 logging.error(f"删除网页 (ID: {page_id}) 时发生严重错误: {e}", exc_info=True)
                 all_success = False
-        
+
         return all_success
 
     def chat(
-        self, query_text: str, chat_history: List[Dict[str, str]], group_ids: Optional[List[str]] = None, agent_id: Optional[str] = None
+        self, query_text: str, chat_history: List[Dict[str, str]], group_ids: Optional[List[str]] = None,
+        agent_id: Optional[str] = None, enable_deep_thinking: bool = False, enable_web_search: bool = False,
+        images: Optional[List[str]] = None, stream: bool = False
     ):
         """
-        进行聊天，可选地在指定组内进行 RAG 检索。
+        智能聊天，支持三种互斥的对话模式。
 
         Args:
             query_text: 用户提出的新问题。
             chat_history: 一个包含过去消息的列表，格式为 [{'role': 'user'/'assistant', 'content': '...'}, ...]
-            group_ids: 如果提供了则执行 RAG，否则执行无状态聊天
+            group_ids: 如果提供了则执行 RAG模式
             agent_id: 如果提供了则使用Agent的system prompt
+            enable_deep_thinking: 是否启用深度思考功能
+            enable_web_search: 是否启用网页搜索功能
+            images: 图片base64数据列表（不包含data:前缀）
+            stream: 是否启用流式响应
 
         Returns:
-            一个包含答案和源节点的响应对象。
+            一个包含答案和源节点的响应对象，或者流式生成器（如果stream=True）。
         """
-        # 1. 确定要使用的system prompt
-        system_prompt = self._get_system_prompt(agent_id, group_ids)
+        # 智能路由逻辑：三种互斥的对话模式
 
-        # 2. 创建并填充聊天内存 (这部分是共用的)
-        llama_chat_history = [
-            ChatMessage(role=msg["role"], content=msg["content"])
-            for msg in chat_history
-        ]
-        memory = ChatMemoryBuffer.from_defaults(chat_history=llama_chat_history)
+        # 如果启用流式，调用流式版本
+        if stream:
+            return self._chat_stream(
+                query_text=query_text,
+                chat_history=chat_history,
+                group_ids=group_ids,
+                agent_id=agent_id,
+                enable_deep_thinking=enable_deep_thinking,
+                enable_web_search=enable_web_search,
+                images=images
+            )
 
-        # 3. 根据是否提供 group_ids 决定聊天引擎类型
-        if group_ids:
-            # --- RAG 聊天模式 ---
-            logging.info(f"在组 {group_ids} 中进行 RAG 聊天: '{query_text}'")
+        # 模式1：联网搜索模式（优先级最高，因为前端已确保互斥）
+        if enable_web_search:
+            logging.info(f"使用联网搜索模式: '{query_text}'")
+            try:
+                answer = self.smart_chat_engine.chat_web_search_mode(
+                    query_text=query_text,
+                    chat_history=chat_history,
+                    enable_deep_thinking=enable_deep_thinking,
+                    agent_id=agent_id,
+                    agent_manager=self.agent_manager,
+                    images=images
+                )
+                # 创建一个简单的响应对象，模拟LlamaIndex的响应格式
+                class SimpleResponse:
+                    def __init__(self, answer):
+                        self.response = answer
+                        self.source_nodes = []  # 联网模式暂时不返回source_nodes
+
+                    def __str__(self):
+                        return self.response
+
+                return SimpleResponse(answer)
+            except Exception as e:
+                logging.error(f"联网搜索模式失败，回退到普通模式: {e}")
+                # 回退到普通模式
+                answer = self.smart_chat_engine.chat_normal_mode(
+                    query_text=query_text,
+                    chat_history=chat_history,
+                    enable_deep_thinking=enable_deep_thinking,
+                    agent_id=agent_id,
+                    agent_manager=self.agent_manager,
+                    images=images
+                )
+                class SimpleResponse:
+                    def __init__(self, answer):
+                        self.response = answer
+                        self.source_nodes = []
+
+                    def __str__(self):
+                        return self.response
+
+                return SimpleResponse(answer)
+
+        # 模式2：RAG模式
+        elif group_ids and len(group_ids) > 0:
+            logging.info(f"使用RAG模式，组: {group_ids}, 查询: '{query_text}'")
+            # 使用原有的RAG逻辑
+            system_prompt = self._get_system_prompt(agent_id, group_ids)
+
+            llama_chat_history = [
+                ChatMessage(role=msg["role"], content=msg["content"])
+                for msg in chat_history
+            ]
+            memory = ChatMemoryBuffer.from_defaults(chat_history=llama_chat_history)
+
             filters = MetadataFilters(
                 filters=[
                     ExactMatchFilter(key="group_id", value=gid) for gid in group_ids
@@ -370,18 +433,158 @@ class RAGPipeline:
                 },
                 system_prompt=system_prompt,
             )
+            response = chat_engine.chat(query_text)
+            return response
+
+        # 模式3：普通模式（默认）
         else:
-            # --- 标准聊天模式 (无 RAG) ---
-            logging.info(f"进行标准聊天 (无 RAG): '{query_text}'")
-            chat_engine = self.index.as_chat_engine(
-                chat_mode="openai",  # "openai" 模式适合上下文聊天，不会进行检索
-                memory=memory,
-                system_prompt=system_prompt,
+            logging.info(f"使用普通模式: '{query_text}'")
+            answer = self.smart_chat_engine.chat_normal_mode(
+                query_text=query_text,
+                chat_history=chat_history,
+                enable_deep_thinking=enable_deep_thinking,
+                agent_id=agent_id,
+                agent_manager=self.agent_manager,
+                images=images
             )
 
-        # 4. 执行聊天
-        response = chat_engine.chat(query_text)
+            class SimpleResponse:
+                def __init__(self, answer):
+                    self.response = answer
+                    self.source_nodes = []
+
+                def __str__(self):
+                    return self.response
+
+            return SimpleResponse(answer)
         return response
+
+    def _chat_stream(
+        self, query_text: str, chat_history: List[Dict[str, str]], group_ids: Optional[List[str]] = None,
+        agent_id: Optional[str] = None, enable_deep_thinking: bool = False, enable_web_search: bool = False,
+        images: Optional[List[str]] = None
+    ):
+        """
+        流式聊天实现，支持三种互斥的对话模式。
+
+        Args:
+            query_text: 用户提出的新问题。
+            chat_history: 聊天历史
+            group_ids: 知识库组ID列表
+            agent_id: Agent ID
+            enable_deep_thinking: 是否启用深度思考功能
+            enable_web_search: 是否启用网页搜索功能
+
+        Yields:
+            流式响应数据
+        """
+        # 模式1：联网搜索模式（优先级最高）
+        if enable_web_search:
+            logging.info(f"使用联网搜索模式（流式）: '{query_text}'")
+            try:
+                for chunk in self.smart_chat_engine.chat_web_search_mode_stream(
+                    query_text=query_text,
+                    chat_history=chat_history,
+                    enable_deep_thinking=enable_deep_thinking,
+                    agent_id=agent_id,
+                    agent_manager=self.agent_manager,
+                    images=images
+                ):
+                    yield chunk
+                return
+            except Exception as e:
+                logging.error(f"联网搜索模式流式失败，回退到普通模式: {e}")
+                # 回退到普通模式流式
+                for chunk in self.smart_chat_engine.chat_normal_mode_stream(
+                    query_text=query_text,
+                    chat_history=chat_history,
+                    enable_deep_thinking=enable_deep_thinking,
+                    agent_id=agent_id,
+                    agent_manager=self.agent_manager,
+                    images=images
+                ):
+                    yield chunk
+                return
+
+        # 模式2：RAG模式
+        elif group_ids and len(group_ids) > 0:
+            logging.info(f"使用RAG模式（流式），组: {group_ids}, 查询: '{query_text}'")
+            # 对于RAG模式，llama-index可能不支持流式，我们使用模拟流式
+            # 先获取完整响应，然后模拟流式输出
+            try:
+                system_prompt = self._get_system_prompt(agent_id, group_ids)
+
+                from llama_index.core.memory import ChatMemoryBuffer
+                from llama_index.core.llms import ChatMessage
+                from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter, FilterCondition
+
+                llama_chat_history = [
+                    ChatMessage(role=msg["role"], content=msg["content"])
+                    for msg in chat_history
+                ]
+                memory = ChatMemoryBuffer.from_defaults(chat_history=llama_chat_history)
+
+                filters = MetadataFilters(
+                    filters=[
+                        ExactMatchFilter(key="group_id", value=gid) for gid in group_ids
+                    ],
+                    condition=FilterCondition.OR,
+                )
+
+                # 尝试使用流式chat_engine
+                chat_engine = self.index.as_chat_engine(
+                    chat_mode="context",
+                    memory=memory,
+                    retriever_kwargs={
+                        "filters": filters,
+                        "similarity_top_k": self.config.SIMILARITY_TOP_K,
+                    },
+                    system_prompt=system_prompt,
+                )
+
+                # 对于RAG模式，我们先获取完整响应，然后模拟流式输出
+                # 这样可以确保sources信息的正确性
+                response = chat_engine.chat(query_text)
+                answer = str(response)
+
+                # 模拟流式输出：按词输出，提供更好的用户体验
+                words = answer.split()
+                for i, word in enumerate(words):
+                    if i == 0:
+                        yield word
+                    else:
+                        yield " " + word
+                    # 适当的延迟，模拟真实的流式体验
+                    import time
+                    time.sleep(0.05)
+                return
+
+            except Exception as e:
+                logging.error(f"RAG模式流式失败，回退到普通模式: {e}")
+                # 回退到普通模式流式
+                for chunk in self.smart_chat_engine.chat_normal_mode_stream(
+                    query_text=query_text,
+                    chat_history=chat_history,
+                    enable_deep_thinking=enable_deep_thinking,
+                    agent_id=agent_id,
+                    agent_manager=self.agent_manager,
+                    images=images
+                ):
+                    yield chunk
+                return
+
+        # 模式3：普通模式（默认）
+        else:
+            logging.info(f"使用普通模式（流式）: '{query_text}'")
+            for chunk in self.smart_chat_engine.chat_normal_mode_stream(
+                query_text=query_text,
+                chat_history=chat_history,
+                enable_deep_thinking=enable_deep_thinking,
+                agent_id=agent_id,
+                agent_manager=self.agent_manager,
+                images=images
+            ):
+                yield chunk
 
     def _get_system_prompt(self, agent_id: Optional[str], group_ids: Optional[List[str]]) -> str:
         """
@@ -453,7 +656,8 @@ class RAGPipeline:
 [指令]:
 
 **角色与核心任务 / Role & Core Task:**
-你是一个名为"文档分析助理"的严谨AI。你的唯一任务是严格、忠实地根据上方 `[文档]` 部分提供的文本内容来回答用户的问题。
+你是一个名为“Astro Qwen”的大语言模型。你由先进的Qwen 3模型微调而来，专门为解答天文学和航天领域的事实性问题而设计。你的核心使命是成为一个专业、准确且引人入胜的太空知识助手。\n
+而且你目前是文档分析助手，一个严谨AI。你的唯一任务是严格、忠实地根据上方 `[文档]` 部分提供的文本内容来回答用户的问题。
 
 **行为准则 / Rules of Conduct:**
 
@@ -469,6 +673,7 @@ class RAGPipeline:
 
 6.  **遵循提问语言 (Follow the Question's Language):** 除非特别指示，否则请使用与用户提问相同的语言（例如，中文问题用中文回答）进行回答。
 
+7.  **不要输出Markdown**：在回答中不要使用Markdown格式，直接输出纯文本内容。通过空行的方式分隔不同段落。
 ---
 现在，请严格遵循以上所有指令，对用户的下一个提问进行回答。
 """
