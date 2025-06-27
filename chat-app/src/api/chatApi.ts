@@ -71,6 +71,7 @@ export interface SourceNode {
 export interface QueryResponse {
   answer: string;
   sources: SourceNode[];
+  new_title?: string;
 }
 
 // 聊天API服务

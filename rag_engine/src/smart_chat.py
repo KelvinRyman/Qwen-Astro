@@ -24,13 +24,11 @@ class SmartChatEngine:
         self.config = config
         self.api_key = os.getenv("API_KEY")
 
-        # 初始化OpenAI客户端（用于普通模式）
         self.openai_client = OpenAI(
             api_key=self.api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
 
-        # 初始化Google GenAI客户端（用于联网模式）
         self.genai_client = genai.Client(api_key=self.api_key)
 
         logger.info("智能聊天引擎初始化完成")
